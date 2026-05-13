@@ -108,4 +108,4 @@ def run_game(
 
 
 if __name__ == "__main__":
-    print("Use: python -m agents.do_nothing / agents.naive_rule / agents.reference_llm")
+    print("Use: python -m agents.do_nothing / agents.naive_rule / agents.starter_template")

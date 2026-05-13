@@ -21,6 +21,13 @@ Set this environment variable and all agent scripts will use it automatically.
 
 ---
 
+## Requirements
+
+- Python 3.9+
+- `pip install -r requirements.txt` (just `httpx`)
+
+---
+
 ## Quick Start
 
 ### 1. Install dependencies
@@ -160,7 +167,7 @@ total_score = net_profit - penalties
 
 Penalties are assessed for low satisfaction, low reputation, walkouts, and food waste. Going bankrupt results in a catastrophic score of -100,000.
 
-**Higher is better.** A typical good score is +15,000 to +35,000.
+**Higher is better.** The included baselines score around -15,000 to -19,000. A well-designed agent can score positive. Aim to beat the baselines first, then optimize.
 
 See [AGENT_CONTRACT.md](AGENT_CONTRACT.md) for scoring priorities. The exact penalty formulas, thresholds, and coefficients are not disclosed.
 
@@ -175,7 +182,7 @@ Order ingredients from a supplier. Delivery takes 1-2 days and only arrives on t
 {"tool": "place_order", "args": {"supplier": "Fresh Farms NL", "ingredient": "Chicken", "quantity_kg": 8}}
 ```
 
-Cost is deducted immediately. Delivery is not guaranteed — suppliers can have disruptions.
+Cost is deducted when the turn is processed. Delivery is not guaranteed — suppliers can have disruptions.
 
 ### set_staff_level
 Adjust staff between 3 and 15. Each staff member costs 120 EUR/day. More staff = faster kitchen, fewer delays. Too few = long waits, walkouts.
@@ -476,7 +483,7 @@ Server health check.
 export RESTBENCH_URL=http://52.48.183.209:8001
 pip install -r requirements.txt
 
-python -m agents.do_nothing        # Bankrupt by day ~14, score: -100,000
+python -m agents.do_nothing        # Bankrupt by day ~16, score: -100,000
 python -m agents.naive_rule         # Survives 30 days
 python -m agents.starter_template   # Your starting point
 python -m agents.compare            # Run all baselines side by side

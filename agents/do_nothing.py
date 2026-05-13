@@ -1,6 +1,6 @@
 """Do-nothing agent — submits zero actions every turn.
 
-Establishes the scoring floor. Expected: bankruptcy around day 9-10, score = -100,000.
+Establishes the scoring floor. Expected: bankruptcy around day 16, score = -100,000.
 """
 
 from __future__ import annotations

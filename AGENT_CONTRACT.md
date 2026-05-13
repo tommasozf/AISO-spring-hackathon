@@ -2,7 +2,7 @@
 
 Your restaurant is losing money. You have 30 days.
 
-You manage a 22-table Italian restaurant. Each simulated day, you receive an **observation** via the REST API describing the current state — financials, inventory, weather, customer signals, supplier catalog. You respond with **tool calls** specifying your decisions: what to order, which dishes to serve, how many staff to schedule, whether to run promotions. Invalid actions are silently rejected. No error messages, no second chances.
+You manage a 22-table Italian restaurant. Each simulated day, you receive an **observation** via the REST API describing the current state — financials, inventory, weather, customer signals, supplier catalog. You respond with **tool calls** specifying your decisions: what to order, which dishes to serve, how many staff to schedule, whether to run promotions. Invalid actions are rejected with a reason message.
 
 ---
 
@@ -38,8 +38,8 @@ POST /games/{id}/action
 {
   "tool": "place_order",
   "args": {
-    "supplier": "Fresh Farms",
-    "ingredient": "fresh_tomatoes",
+    "supplier": "Fresh Farms NL",
+    "ingredient": "Tomato Sauce",
     "quantity_kg": 15.0
   }
 }
@@ -91,18 +91,18 @@ Every day you receive an observation. Here is an abbreviated example from day 5:
 
   "inventory": [
     {
-      "ingredient": "flour",
+      "ingredient": "Flour",
       "total_kg": 42.5,
-      "shelf_life_days": 60,
+      "shelf_life_days": 14,
       "batches": [
-        {"quantity_kg": 22.5, "expires_in_days": 55},
-        {"quantity_kg": 20.0, "expires_in_days": 58}
+        {"quantity_kg": 22.5, "expires_in_days": 9},
+        {"quantity_kg": 20.0, "expires_in_days": 12}
       ]
     },
     {
-      "ingredient": "fresh_tomatoes",
+      "ingredient": "Tomato Sauce",
       "total_kg": 8.3,
-      "shelf_life_days": 5,
+      "shelf_life_days": 7,
       "batches": [
         {"quantity_kg": 8.3, "expires_in_days": 2}
       ]
@@ -116,7 +116,7 @@ Every day you receive an observation. Here is an abbreviated example from day 5:
     "hourly_covers": [3, 14, 12, 5, 2, 3, 6, 12, 18, 16, 9, 3],
     "avg_wait_minutes": 4.2,
     "peak_wait_minutes": 14.7,
-    "dishes_sold": {"Pizza Margherita": 18, "Penne Arrabbiata": 12},
+    "dishes_sold": {"Pizza Margherita": 18, "Chicken Parmesan": 12},
     "dishes_unavailable_at": {},
     "substitution_count": 2,
     "table_utilization_peak": 0.77,
@@ -125,31 +125,31 @@ Every day you receive an observation. Here is an abbreviated example from day 5:
 
   "supplier_catalog": [
     {
-      "name": "Fresh Farms",
+      "name": "Fresh Farms NL",
       "lead_time_days": 1,
       "delivery_days": ["Monday", "Wednesday", "Friday"],
       "min_order_kg": 5.0,
-      "ingredients": {"fresh_tomatoes": 3.5, "lettuce": 2.8}
+      "ingredients": {"Tomato Sauce": 3.1, "Mushrooms": 4.2, "Lettuce": 2.8, "Chicken": 8.5}
     }
   ],
 
   "pending_orders": [
-    {"supplier": "Fresh Farms", "ingredient": "fresh_tomatoes",
+    {"supplier": "Fresh Farms NL", "ingredient": "Tomato Sauce",
      "quantity_kg": 15.0, "delivery_day": 7}
   ],
 
   "delivery_history": [
-    {"supplier": "Fresh Farms", "ingredient": "fresh_tomatoes",
+    {"supplier": "Fresh Farms NL", "ingredient": "Tomato Sauce",
      "ordered_kg": 15.0, "delivered_kg": 15.0, "order_day": 2,
      "delivery_day": 3, "on_time": true}
   ],
 
   "menu_book": [
-    {"name": "Pizza Margherita", "category": "pizza",
-     "base_price": 12.5, "current_price": 12.5, "is_active": true,
-     "ingredients": [{"ingredient": "flour", "quantity_kg": 0.2}]}
+    {"name": "Pizza Margherita", "category": "Pizza",
+     "base_price": 14.5, "current_price": 14.5, "is_active": true,
+     "ingredients": [{"ingredient": "Flour", "quantity_kg": 0.25}]}
   ],
-  "active_menu": ["Pizza Margherita", "Penne Arrabbiata"],
+  "active_menu": ["Pizza Margherita", "Chicken Parmesan", "Mushroom Tagliatelle", "Spaghetti Carbonara", "Grilled Salmon"],
 
   "staff_level": 8,
   "staff_cost_per_person": 120.0,
@@ -165,7 +165,7 @@ Every day you receive an observation. Here is an abbreviated example from day 5:
   "weather_forecast": ["cloudy", "rainy", "sunny"],
 
   "alerts": [],
-  "notes": "Day 4: ordered tomatoes. Watching flour levels.",
+  "notes": "Day 4: ordered Tomato Sauce. Watching Flour levels.",
   "tick_budget_ms": 30000
 }
 ```
@@ -228,8 +228,8 @@ Submit tool calls via `POST /games/{id}/action`. Each call is `{"tool": "<name>"
 
 | Tool | Args | Effect |
 |------|------|--------|
-| `place_order` | `supplier`, `ingredient`, `quantity_kg` | Order ingredients. Cost deducted immediately. Delivered after lead time on a valid delivery day. |
-| `set_menu` | `dishes` (list of names) | Set active menu. Minimum 5 dishes. Unknown names silently dropped. |
+| `place_order` | `supplier`, `ingredient`, `quantity_kg` | Order ingredients. Cost deducted at end of turn. Delivered after lead time on a valid delivery day. |
+| `set_menu` | `dishes` (list of names) | Set active menu. Minimum 5 dishes. |
 | `set_price` | `dish`, `price` | Set dish price. Must be within 80%-120% of base price. |
 | `set_staff_level` | `level` (int) | Hire or fire. Range: 3-15. |
 | `set_marketing_spend` | `amount` (float) | Marketing budget for today. Range: 0-500 EUR. |
@@ -241,15 +241,17 @@ Submit tool calls via `POST /games/{id}/action`. Each call is `{"tool": "<name>"
 
 ## Validation Rules
 
-Actions are validated before execution. Invalid actions are **silently rejected** — you will not be told what failed. Design defensively.
+Actions are validated when submitted. Invalid actions return `{"status": "rejected", "reason": "..."}` with a specific error message explaining what went wrong.
 
-- **Orders:** Supplier must exist. Ingredient must be in that supplier's catalog. Quantity must meet `min_order_kg`. Total cost must not exceed remaining cash.
-- **Menu:** Minimum 5 valid dishes. Unknown dish names silently dropped. If fewer than 5 valid dishes remain, current menu is kept.
+- **Orders:** Supplier must exist. Ingredient must be in that supplier's catalog. Quantity must be positive and meet `min_order_kg`. Total cost must not exceed remaining cash.
+- **Menu:** All dish names must exist. Minimum 5 dishes after deduplication.
 - **Prices:** Dish must exist. Price must be between 0.8x and 1.2x the base price.
 - **Staff:** Integer between 3 and 15. Out of range is rejected.
 - **Marketing:** Between 0 and 500 EUR. Out of range is rejected.
-- **Daily special:** Must be a dish on the current active menu.
+- **Daily special:** Dish must exist in the recipe book.
 - **Notes:** Truncated to 4,000 characters if longer.
+
+**Names are case-sensitive.** Use the exact names from the observation (e.g., `"Fresh Farms NL"`, `"Tomato Sauce"`, `"Pizza Margherita"`).
 
 ---
 

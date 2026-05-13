@@ -28,20 +28,20 @@ def main():
         naive_rule_strategy, base_url=base_url, team_name="naive_rule", seed=seed
     )
 
-    llm_result = None
-    if os.environ.get("OPENAI_API_KEY"):
+    llm_template_result = None
+    if os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY"):
         try:
-            from agents.reference_llm import strategy as llm_strategy
+            from agents.llm_template import strategy as llm_template_strategy
             print("\n" + "=" * 60)
-            print("REFERENCE LLM AGENT (GPT-4.1)")
+            print(f"LLM TEMPLATE AGENT ({os.getenv('AGENT_MODEL', 'openai/gpt-4.1-mini')})")
             print("=" * 60)
-            llm_result = run_game(
-                llm_strategy, base_url=base_url, team_name="reference_llm", seed=seed
+            llm_template_result = run_game(
+                llm_template_strategy, base_url=base_url, team_name="llm_template", seed=seed
             )
         except ImportError:
-            print("\nSkipping LLM agent (reference_llm not available)")
+            print("\nSkipping LLM agent (llm_template not available)")
     else:
-        print("\nSkipping LLM agent (no OPENAI_API_KEY set)")
+        print("\nSkipping LLM agent (no API key set)")
 
     print("\n" + "=" * 60)
     print("COMPARISON")
@@ -50,8 +50,8 @@ def main():
         ("Do-Nothing", do_nothing_result),
         ("Naive Rule", naive_result),
     ]
-    if llm_result:
-        rows.append(("Reference LLM", llm_result))
+    if llm_template_result:
+        rows.append(("LLM Template", llm_template_result))
 
     print(f"{'Agent':<20} {'Score':>10} {'Profit':>10} {'Days':>6} {'Final Cash':>12}")
     print("-" * 62)

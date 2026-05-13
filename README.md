@@ -106,7 +106,20 @@ curl $RESTBENCH_URL/leaderboard
 
 ## Building Your Agent
 
-### Python (recommended)
+### LLM-based agent (recommended)
+
+Copy the LLM template and improve the prompt:
+
+```bash
+cp agents/llm_template.py agents/my_agent.py
+export OPENAI_API_KEY=sk-...          # or ANTHROPIC_API_KEY for Claude
+export AGENT_MODEL=openai/gpt-4.1-mini  # any litellm-supported model
+python -m agents.my_agent
+```
+
+The template sends the raw observation to an LLM with a minimal prompt. It works out of the box, but there's a lot of room to improve: write a better system prompt, add conversation history, filter the observation, tune the model. See the comments in `llm_template.py`.
+
+### Rule-based agent
 
 Copy the starter template and edit the `strategy()` function:
 
@@ -484,7 +497,12 @@ export RESTBENCH_URL=http://52.48.183.209:8001
 pip install -r requirements.txt
 
 python -m agents.do_nothing        # Bankrupt by day ~16, score: -100,000
-python -m agents.naive_rule         # Survives 30 days
-python -m agents.starter_template   # Your starting point
+python -m agents.naive_rule         # Survives 30 days, score: ~-15,000
+python -m agents.starter_template   # Rule-based starting point
+
+# LLM agent (requires API key):
+export OPENAI_API_KEY=sk-...
+python -m agents.llm_template      # LLM starting point — improve the prompt!
+
 python -m agents.compare            # Run all baselines side by side
 ```

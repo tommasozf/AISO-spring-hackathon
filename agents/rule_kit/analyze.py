@@ -20,6 +20,12 @@ Usage:
     # rejections + safety filter drops per day
     python -m agents.rule_kit.analyze --decisions runs/<file>.jsonl
 
+    # per-day regime signals (axis × sign × source × confidence)
+    python -m agents.rule_kit.analyze --regimes runs/<file>.jsonl
+
+    # day-1 supplier catalog + menu book (captured once per run)
+    python -m agents.rule_kit.analyze --catalog runs/<file>.jsonl
+
     # aggregate across many runs (e.g. evaluate output)
     python -m agents.rule_kit.analyze --aggregate runs/
 """
@@ -172,14 +178,93 @@ def view_decisions(rows: List[Dict[str, Any]]) -> None:
         )
 
 
+_REGIME_AXES = ("demand", "supply_ingredient", "supply_capacity", "cost")
+
+
+def _fmt_signal(sig: Dict[str, Any]) -> str:
+    """Compact one-cell representation of a per-axis RegimeSignal."""
+    if not sig:
+        return "      -      "
+    sign = sig.get("sign", 0)
+    if sign == 0:
+        symbol = " . "
+    elif sign > 0:
+        symbol = " + "
+    else:
+        symbol = " - "
+    src = (sig.get("source") or "")[:3]
+    conf = (sig.get("confidence") or "")[:1]
+    z = sig.get("magnitude_z")
+    try:
+        z_s = f"{float(z):+.1f}"
+    except (TypeError, ValueError):
+        z_s = "  ? "
+    days = sig.get("days_in_regime", 0) or 0
+    return f"{symbol}z{z_s} {src} {conf}{int(days):>2}"
+
+
+def view_regimes(rows: List[Dict[str, Any]]) -> None:
+    """Per-day axis × signal_state table.
+
+    Each axis cell shows: <sign><|z|> <source[0:3]> <conf[0:1]><days_in_regime>
+    where sign is +/-/. (. = normal), source is alt/res/nor, and conf is h/m/l.
+    """
+    scen_hdr = "Scenario"
+    print(
+        f"{'Day':>3} {'DoW':<4} {scen_hdr:<14} "
+        f"{'Demand':<16} {'Supply-Ing':<16} {'Supply-Cap':<16} {'Cost':<16}"
+    )
+    print("-" * 96)
+    any_regime = False
+    for r in rows:
+        s = r.get("summary") or {}
+        d = r.get("decisions") or {}
+        regimes = d.get("regimes") or {}
+        if regimes:
+            any_regime = True
+        scen = (d.get("scenario") or "-")[:14]
+        dow = (s.get("day_of_week") or "?")[:3]
+        cells = [_fmt_signal(regimes.get(a) or {}) for a in _REGIME_AXES]
+        print(
+            f"{r.get('day', 0):>3} {dow:<4} {scen:<14} "
+            f"{cells[0]:<16} {cells[1]:<16} {cells[2]:<16} {cells[3]:<16}"
+        )
+    if not any_regime:
+        print("\n(no `regimes` field found — was telemetry written by a "
+              "pre-Phase-1 agent build?)")
+    # Footer: summary counts per axis.
+    print()
+    summary_counts: Dict[str, Dict[str, int]] = {a: {} for a in _REGIME_AXES}
+    for r in rows:
+        regimes = (r.get("decisions") or {}).get("regimes") or {}
+        for axis in _REGIME_AXES:
+            sig = regimes.get(axis) or {}
+            key = f"{sig.get('sign', 0):+d}/{sig.get('source', '-')}"
+            summary_counts[axis][key] = summary_counts[axis].get(key, 0) + 1
+    print("Per-axis state counts across all days:")
+    for axis in _REGIME_AXES:
+        rows_summary = ", ".join(
+            f"{k}={v}" for k, v in sorted(summary_counts[axis].items(),
+                                          key=lambda x: -x[1])
+        )
+        print(f"  {axis:<18} {rows_summary}")
+
+
 def view_list(directory: str) -> None:
-    """List runs in a directory with brief metadata."""
+    """List runs in a directory with brief metadata.
+
+    Also surfaces whether day-1 reference data (supplier_catalog, menu_book)
+    was captured — shown as counts in the Suppl / Menu columns ('-' if absent).
+    """
     paths = sorted(glob(os.path.join(directory, "*.jsonl")))
     if not paths:
         print(f"No .jsonl files in {directory}")
         return
-    print(f"{'File':<50} {'Turns':>5} {'LastDay':>7} {'FinalCash':>10} {'Walk':<5} {'Rep':<10}")
-    print("-" * 95)
+    print(
+        f"{'File':<50} {'Turns':>5} {'LastDay':>7} {'FinalCash':>10} "
+        f"{'Walk':<5} {'Rep':<10} {'Suppl':>5} {'Menu':>5}"
+    )
+    print("-" * 110)
     for p in paths:
         try:
             rows = load(p)
@@ -192,14 +277,73 @@ def view_list(directory: str) -> None:
         last = rows[-1]
         s = last["summary"]
         svc = s.get("service_summary") or {}
+        # Day-1 reference data — only present on the first row when captured.
+        first_summary = (rows[0].get("summary") or {})
+        suppl = first_summary.get("supplier_catalog")
+        menu = first_summary.get("menu_book")
+        suppl_str = f"{len(suppl)}" if isinstance(suppl, list) else "-"
+        menu_str = f"{len(menu)}" if isinstance(menu, list) else "-"
         print(
             f"{os.path.basename(p):<50} "
             f"{len(rows):>5} "
             f"{last['day']:>7} "
             f"{(s.get('cash') or 0):>10.0f} "
             f"{(svc.get('walkout_band') or '-'):<5} "
-            f"{(s.get('reputation_band') or '-'):<10}"
+            f"{(s.get('reputation_band') or '-'):<10} "
+            f"{suppl_str:>5} "
+            f"{menu_str:>5}"
         )
+
+
+def view_catalog(rows: List[Dict[str, Any]]) -> None:
+    """Dump the day-1 supplier catalog + menu book if present."""
+    if not rows:
+        print("No rows.")
+        return
+    first = rows[0].get("summary") or {}
+    suppl = first.get("supplier_catalog")
+    menu = first.get("menu_book")
+
+    if suppl is None and menu is None:
+        print(
+            "No supplier_catalog or menu_book in day-1 summary.\n"
+            "(Older runs may pre-date telemetry capture of these fields.)"
+        )
+        return
+
+    if suppl is not None:
+        print("=== Supplier catalog ===")
+        for s in suppl:
+            name = s.get("name") or s.get("supplier") or "?"
+            ing = s.get("ingredient") or "?"
+            price = s.get("price_per_kg")
+            dd = s.get("delivery_days")
+            lt = s.get("lead_time") if "lead_time" in s else s.get("lead_time_days")
+            moq = s.get("min_order_kg")
+            print(
+                f"  {name:<24} {ing:<14} "
+                f"price/kg={price} delivery_days={dd} "
+                f"lead_time={lt} min_order_kg={moq}"
+            )
+        print()
+
+    if menu is not None:
+        print("=== Menu book ===")
+        for r in menu:
+            dish = r.get("name") or r.get("dish") or "?"
+            ings = r.get("ingredients") or r.get("recipe") or []
+            print(f"  {dish}")
+            if isinstance(ings, list):
+                for ing in ings:
+                    if isinstance(ing, dict):
+                        nm = ing.get("ingredient") or ing.get("name") or "?"
+                        qty = ing.get("quantity_kg")
+                        print(f"      - {nm:<14} {qty} kg")
+                    else:
+                        print(f"      - {ing}")
+            elif isinstance(ings, dict):
+                for nm, qty in ings.items():
+                    print(f"      - {nm:<14} {qty} kg")
 
 
 def view_aggregate(directory: str) -> None:
@@ -264,7 +408,9 @@ def main() -> None:
     p.add_argument("--stockouts", action="store_true", help="List stockout events")
     p.add_argument("--actions", action="store_true", help="Action counts per day")
     p.add_argument("--decisions", action="store_true", help="Forecast + decisions per day")
+    p.add_argument("--regimes", action="store_true", help="Per-day regime signals (axis × state)")
     p.add_argument("--inventory", help="Track one ingredient's stock over time")
+    p.add_argument("--catalog", action="store_true", help="Show day-1 supplier catalog + menu book")
     p.add_argument("--aggregate", action="store_true", help="Aggregate across all runs in dir")
     args = p.parse_args()
 
@@ -290,8 +436,12 @@ def main() -> None:
         view_actions(rows)
     elif args.decisions:
         view_decisions(rows)
+    elif args.regimes:
+        view_regimes(rows)
     elif args.inventory:
         view_inventory(rows, args.inventory)
+    elif args.catalog:
+        view_catalog(rows)
     else:
         view_summary(rows)
 

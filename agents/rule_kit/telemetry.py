@@ -65,7 +65,8 @@ def record_turn(
 
 
 def _summarize_observation(obs: Dict[str, Any]) -> Dict[str, Any]:
-    """Compact summary — strip the big repetitive fields (menu_book, supplier_catalog)."""
+    """Compact summary — strip the big repetitive fields (menu_book, supplier_catalog),
+    except on day 1 where we capture them once for the run (they don't change)."""
     inv = []
     for i in obs.get("inventory") or []:
         batches = i.get("batches") or []
@@ -78,7 +79,7 @@ def _summarize_observation(obs: Dict[str, Any]) -> Dict[str, Any]:
             "n_batches": len(batches),
         })
 
-    return {
+    summary: Dict[str, Any] = {
         "day_of_week": obs.get("day_of_week"),
         "days_remaining": obs.get("days_remaining"),
         "cash": obs.get("cash"),
@@ -97,3 +98,13 @@ def _summarize_observation(obs: Dict[str, Any]) -> Dict[str, Any]:
         "pending_orders": obs.get("pending_orders"),
         "delivery_history_tail": (obs.get("delivery_history") or [])[-5:],
     }
+
+    # Capture static reference data once on day 1. These don't change across
+    # the run, so logging them every turn would just balloon file size.
+    if int(obs.get("day", 0)) == 1:
+        if obs.get("supplier_catalog") is not None:
+            summary["supplier_catalog"] = obs.get("supplier_catalog")
+        if obs.get("menu_book") is not None:
+            summary["menu_book"] = obs.get("menu_book")
+
+    return summary

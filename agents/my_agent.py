@@ -1,8 +1,7 @@
-"""Master Profitability Agent
+"""Robust Master Profitability Agent
 
-This agent implements a highly optimized, 100% deterministic mathematical
-control system that dynamically scales prices, staff, marketing, and inventory
-to maximize profit while maintaining near-perfect reputation.
+Highly optimized, 100% deterministic control system that scales prices,
+staff, marketing, and inventory perfectly using forecast covers and recipe-scaled logistics.
 """
 
 from __future__ import annotations
@@ -29,10 +28,9 @@ def strategy(observation: dict, day: int) -> list[dict]:
     weather = observation.get("weather_today", "cloudy")
     rep = observation.get("reputation_band", "Good")
     
-    # 2. Sunday closed-day check
     is_sunday = (dow == "Sunday")
     
-    # 3. FORECAST DEMAND (expected_covers)
+    # 2. FORECAST DEMAND (expected_covers)
     if is_sunday:
         expected_covers = 0
     else:
@@ -63,12 +61,11 @@ def strategy(observation: dict, day: int) -> list[dict]:
             
         expected_covers = max(10, base_covers)
     
-    # 4. STAFFING OPTIMIZER
-    # Scale staff dynamically to fully capture high-demand revenue while keeping labor costs low.
+    # 3. STAFFING OPTIMIZER
     if is_sunday:
-        staff_level = 3  # Closed day, absolute minimum staff to save cash
+        staff_level = 3  # Closed day savings
     else:
-        # Calibrated peak staffing to prevent walkouts on high-demand days
+        # Calibrated peak staffing to handle demand surges
         if expected_covers > 150:
             staff_level = 11
         elif expected_covers > 120:
@@ -86,7 +83,7 @@ def strategy(observation: dict, day: int) -> list[dict]:
             
     actions.append({"tool": "set_staff_level", "args": {"level": staff_level}})
     
-    # 5. MARKETING & PROMOTIONS OPTIMIZER
+    # 4. MARKETING & PROMOTIONS OPTIMIZER
     marketing_spend = 0.0
     if not is_sunday and cash > 4000 and dow in ["Monday", "Tuesday", "Wednesday", "Thursday"]:
         if expected_covers < 80:
@@ -99,8 +96,8 @@ def strategy(observation: dict, day: int) -> list[dict]:
     if not is_sunday and rep in ["Good", "Fair", "Poor"] and cash > 4000:
         actions.append({"tool": "run_happy_hour", "args": {}})
         
-    # 6. DYNAMIC PRICING OPTIMIZER
-    # Safe dynamic pricing to maximize margin without crashing demand
+    # 5. DYNAMIC PRICING OPTIMIZER
+    # Dynamic pricing based on expected covers
     price_multiplier = 1.12
     if expected_covers > 120:
         price_multiplier = 1.18
@@ -121,12 +118,11 @@ def strategy(observation: dict, day: int) -> list[dict]:
         if dish_name in menu_book:
             base_price = menu_book[dish_name]["base_price"]
             target_price = round(base_price * price_multiplier, 2)
-            # Strict safety clamp to 1.19x base price to prevent any float precision rejections from the server
+            # Clamped strictly to 1.19x base price to completely avoid precision rejections
             target_price = min(target_price, round(base_price * 1.19, 2))
             actions.append({"tool": "set_price", "args": {"dish": dish_name, "price": target_price}})
             
-    # 7. DAILY SPECIAL
-    # Always set the daily special to the active dish with the highest base price to boost high-margin sales
+    # 6. DAILY SPECIAL
     highest_price_dish = None
     highest_price = 0.0
     for dish_name in active_menu:
@@ -139,36 +135,45 @@ def strategy(observation: dict, day: int) -> list[dict]:
     if highest_price_dish and not is_sunday:
         actions.append({"tool": "offer_daily_special", "args": {"dish": highest_price_dish}})
         
-    # 8. INVENTORY ORDERING OPTIMIZER
-    # We must keep a high target stock (15.0kg) to completely eliminate 0-cover days caused by delayed deliveries!
-    if is_sunday:
-        TARGET_STOCK = 5.0  # Closed tomorrow, keep inventory low
-    else:
-        TARGET_STOCK = 15.0  # Safe robust buffer to prevent running out of food
-    
-    # Cheapest supplier mapping
+    # 7. RECIPE-SCALED INVENTORY OPTIMIZER
+    # Extract cheapest suppliers from catalog
     cheapest_supplier = {}
     for sup in observation.get("supplier_catalog", []):
         for ingredient, price in sup["ingredients"].items():
             if ingredient not in cheapest_supplier or price < cheapest_supplier[ingredient][1]:
                 cheapest_supplier[ingredient] = (sup["name"], price, sup["min_order_kg"])
                 
-    # Determine required ingredients based on active menu
+    # Calculate recipe requirements per cover
+    ingredient_use_per_cover = {}
+    for dish_name in active_menu:
+        if dish_name in menu_book:
+            for ing in menu_book[dish_name].get("ingredients", []):
+                name = ing["ingredient"]
+                qty = ing["quantity_kg"]
+                ingredient_use_per_cover[name] = ingredient_use_per_cover.get(name, 0.0) + (qty / len(active_menu))
+                
     required_ingredients = set()
     for dish_name in active_menu:
         if dish_name in menu_book:
             for ing in menu_book[dish_name].get("ingredients", []):
                 required_ingredients.add(ing["ingredient"])
                 
-    # Reorder ingredients to reach TARGET_STOCK
-    budget = cash - 1500  # Cash safety reserve
+    # Order ingredients
+    budget = cash - 1000  # Cash safety reserve
     
-    # Sort ingredients by price to prioritize cheaper/critical ingredients first
     order_queue = []
     for ingredient in required_ingredients:
         if ingredient not in cheapest_supplier:
             continue
         supplier, price, min_qty = cheapest_supplier[ingredient]
+        
+        # Safe recipe-scaled inventory target stock (minimum 12.0kg to prevent crisis shortages)
+        use_rate = ingredient_use_per_cover.get(ingredient, 0.08)
+        TARGET_STOCK = max(12.0, expected_covers * use_rate * 2.5 + 5.0)
+        
+        if is_sunday:
+            TARGET_STOCK = 5.0
+            
         stock = inventory.get(ingredient, 0.0) + pending.get(ingredient, 0.0)
         if stock < TARGET_STOCK:
             qty_needed = TARGET_STOCK - stock
@@ -176,7 +181,7 @@ def strategy(observation: dict, day: int) -> list[dict]:
             cost = qty_to_order * price
             order_queue.append((price, ingredient, supplier, qty_to_order, cost))
             
-    order_queue.sort() # Prioritize cheaper ingredients
+    order_queue.sort()  # Prioritize cheaper ingredients
     
     for price, ingredient, supplier, qty, cost in order_queue:
         if cost <= budget:
@@ -190,5 +195,5 @@ def strategy(observation: dict, day: int) -> list[dict]:
 
 
 if __name__ == "__main__":
-    print("Starting Master Profitability Agent...")
-    result = run_game(strategy, team_name="master_profit_agent", seed=42)
+    print("Starting Agent...")
+    result = run_game(strategy, team_name="Restauranteers", seed=42)

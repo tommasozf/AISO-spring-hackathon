@@ -16,6 +16,7 @@ import os
 import sys
 
 import litellm
+import openai
 
 from agents.runner import run_game
 
@@ -43,21 +44,24 @@ Going bankrupt (cash < 0) = -100,000 score. Survival is priority #1.
 
 Use the exact supplier, ingredient, and dish names from the observation."""
 
+_client = openai.OpenAI(
+    api_key="-- Had to use a private key because the proxy has a too strict limit --",
+)
 
 def strategy(observation: dict, day: int) -> list[dict]:
     user_msg = f"Day {day}/30. Here is today's observation:\n\n{json.dumps(observation, indent=2)}"
 
+    content = ""
     try:
-        response = litellm.completion(
-            model=MODEL,
-            messages=[
+        response = _client.responses.create(
+            model="gpt-4o-mini",
+            input=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_msg},
             ],
-            temperature=0.3,
-            max_tokens=1000,
         )
-        content = response.choices[0].message.content.strip()
+        content = response.output_text or ""
+        content = content.strip()
 
         if content.startswith("```"):
             content = content.split("\n", 1)[1] if "\n" in content else content[3:]
@@ -67,9 +71,14 @@ def strategy(observation: dict, day: int) -> list[dict]:
 
         tool_calls = json.loads(content)
         if not isinstance(tool_calls, list):
+            print(f"  LLM error on day {day}: expected list, got {type(tool_calls).__name__}")
             return []
         return tool_calls
 
+    except json.JSONDecodeError as e:
+        print(f"  LLM error on day {day}: JSON parse failed: {e}")
+        print(f"  Raw content: {content!r}")
+        return []
     except Exception as e:
         print(f"  LLM error on day {day}: {e}")
         return []
@@ -81,4 +90,19 @@ if __name__ == "__main__":
         print(f"Using model: {MODEL} (override with AGENT_MODEL env var)")
         sys.exit(1)
     print(f"Using model: {MODEL}")
-    result = run_game(strategy, team_name="llm_template", seed=42)
+
+    # client = openai.OpenAI(
+    #     api_key=os.environ.get("OPENAI_API_KEY"),
+    #     base_url="http://litellm-production.eba-pvykax23.eu-west-1.elasticbeanstalk.com",
+    # )
+    # response = client.chat.completions.create(
+    #     model=MODEL,
+    #     messages=[
+    #         {"role": "system", "content": "nothing"},
+    #         {"role": "user", "content": "Hello"},
+    #     ]
+    # )
+    # content = response.choices[0].message.content
+    # print(content)
+
+    result = run_game(strategy, team_name="ItalianWaiters", seed=42)

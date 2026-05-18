@@ -1,9 +1,58 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 
+import openai
+
 from agents.runner import run_game
+
+_llm_client = None
+LLM_MODEL = os.getenv("AGENT_MODEL", "openai/gpt-4.1-mini")
+
+
+def _get_llm_client():
+    global _llm_client
+    if _llm_client is None:
+        _llm_client = openai.OpenAI(
+            api_key=os.getenv("OPENAI_API_KEY", "no-key"),
+            base_url="http://litellm-production.eba-pvykax23.eu-west-1.elasticbeanstalk.com",
+        )
+    return _llm_client
+
+
+SCENARIO_DETECTION_PROMPT = """\
+You classify the scenario in a 30-day Italian restaurant simulation. Default to "baseline" unless there is STRONG evidence of a special scenario.
+
+IMPORTANT: Normal baseline behavior includes:
+- Covers naturally vary 40-90 per day. Weekends (Fri/Sat/Sun) are 30-50% higher than weekdays. This is NOT tourist season.
+- Weather affects demand: sunny days have more covers, rainy/stormy days fewer. This is normal.
+- Reputation fluctuates between Good and Very Good normally. This is NOT a health scare.
+- Customer trend may show Growing or Declining briefly. Short dips are normal, NOT silent drift.
+- A scenario should only be detected from ALERTS or from extreme, sustained (5+ day) patterns.
+
+Scenarios (only classify if evidence is clear and unambiguous):
+
+- **baseline** — Normal operations. DEFAULT when no strong signals exist.
+- **supply_crisis** — Alerts about supplier problems, delivery failures, shortages, strikes.
+- **tourist** — Alerts about tourist influx, festivals, events. OR covers sustained 50%+ above normal for 5+ days.
+- **renovation** — Alerts about construction, renovation, fewer tables, reduced capacity.
+- **inflation** — Alerts about rising costs, price increases, inflation.
+- **health_scare** — Alerts about inspections, food safety, hygiene violations. OR reputation dropped to Fair/Poor for 3+ consecutive days with no recovery.
+- **premium_pivot** — Alerts about upscale market shift, premium/luxury expectations.
+- **black_swan** — Alerts about emergency, disaster, crisis. OR covers collapsed 60%+ for 3+ days.
+- **feast_or_famine** — Alerts about volatile/erratic demand. OR extreme day-to-day swings (50%+ variation) sustained over a week.
+- **silent_drift** — Alerts about gradual decline, erosion. OR steady decline in covers over 8+ days with no recovery.
+
+If the previous_scenario is set and still plausible, keep it. Scenarios rarely change mid-game.
+
+Respond with ONLY the scenario name, nothing else."""
+
+VALID_SCENARIOS = {
+    "baseline", "supply_crisis", "tourist", "renovation", "inflation",
+    "health_scare", "premium_pivot", "black_swan", "feast_or_famine", "silent_drift",
+}
 
 DAYS_OF_WEEK = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
@@ -108,30 +157,108 @@ def estimate_delivery_day(
     return current_day + lead_time + 7
 
 
-def detect_scenario(observation: dict, state: dict, day: int) -> str:
+def _detect_scenario_llm(observation: dict, state: dict, day: int) -> str | None:
+    try:
+        client = _get_llm_client()
+        context = {
+            "day": day,
+            "alerts": observation.get("alerts", []),
+            "stored_alerts": state.get("al", []),
+            "cash": observation.get("cash"),
+            "reputation": observation.get("reputation"),
+            "customer_trend": observation.get("customer_trend"),
+            "weather_today": observation.get("weather_today"),
+        }
+        yesterday = observation.get("yesterday_service") or observation.get("service_summary") or {}
+        if yesterday:
+            context["yesterday_walkouts"] = yesterday.get("walkout_band")
+
+        resp = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {"role": "system", "content": SCENARIO_DETECTION_PROMPT},
+                {"role": "user", "content": json.dumps(context)},
+            ],
+            temperature=0,
+            max_tokens=20,
+        )
+        result = resp.choices[0].message.content.strip().lower().replace(" ", "_")
+        print(f"  [LLM] day {day}: {result}")
+        if result in VALID_SCENARIOS:
+            return result
+        for s in VALID_SCENARIOS:
+            if s in result:
+                return s
+        print(f"  LLM scenario detection returned invalid: {result}")
+        return None
+    except Exception as e:
+        print(f"  LLM scenario detection error day {day}: {e}")
+        return None
+
+
+def _detect_scenario_keywords(observation: dict, state: dict, day: int) -> str:
     current = state.get("sc", "")
     alerts = observation.get("alerts", []) + state.get("al", [])
     text = " ".join(str(a) for a in alerts).lower()
 
     if any(w in text for w in ("renovation", "construction", "tables are unavailable", "tables unavailable", "fewer table")):
         return "renovation"
-    if any(w in text for w in ("supplier", "outage", "halted", "disruption", "shortage")):
+    if any(w in text for w in ("supplier", "outage", "halted", "disruption", "shortage", "strike")):
         return "supply_crisis"
     if any(w in text for w in ("tourist", "surge", "festival", "event", "influx", "boom")):
         return "tourist"
-    if any(w in text for w in ("inflation", "price increase", "cost rise")):
+    if any(w in text for w in ("inflation", "price increase", "cost rise", "rising cost", "price hike", "expensive")):
         return "inflation"
-    if any(w in text for w in ("health", "scare", "inspection", "food safety")):
+    if any(w in text for w in ("health", "scare", "inspection", "food safety", "complaint", "violation", "hygiene")):
         return "health_scare"
+    if any(w in text for w in ("premium", "upscale", "luxury", "fine dining", "exclusive", "gourmet", "high-end")):
+        return "premium_pivot"
+    if any(w in text for w in ("black swan", "emergency", "disaster", "catastroph", "pandemic", "crisis", "closure", "fire", "flood")):
+        return "black_swan"
+    if any(w in text for w in ("feast", "famine", "volatile", "unpredictable", "fluctuat", "erratic", "swing")):
+        return "feast_or_famine"
+    if any(w in text for w in ("drift", "gradual", "slow decline", "erosion", "fading")):
+        return "silent_drift"
 
     covers = state.get("cov", [])
+    rep_hist = state.get("rep", [])
+
     if len(covers) >= 5 and not current:
         recent = sum(covers[-3:]) / 3
         older = sum(covers[-6:-3]) / max(len(covers[-6:-3]), 1)
         if older > 10 and recent / older > 1.5:
             return "tourist"
+        if older > 10 and recent / older < 0.4:
+            return "black_swan"
+        if len(covers) >= 7:
+            diffs = [abs(covers[i] - covers[i - 1]) for i in range(-4, 0)]
+            avg_diff = sum(diffs) / len(diffs)
+            avg_cov = sum(covers[-7:]) / 7
+            if avg_cov > 30 and avg_diff / max(avg_cov, 1) > 0.5:
+                return "feast_or_famine"
+
+    if len(rep_hist) >= 3 and not current:
+        bad_reps = {"Fair", "Poor"}
+        if all(r in bad_reps for r in rep_hist[-3:]):
+            return "health_scare"
+
+    if len(covers) >= 8 and not current:
+        first_half = sum(covers[:4]) / 4
+        second_half = sum(covers[-4:]) / 4
+        if first_half > 50 and second_half / first_half < 0.7:
+            return "silent_drift"
 
     return current or "baseline"
+
+
+def detect_scenario(observation: dict, state: dict, day: int) -> str:
+    keyword_result = _detect_scenario_keywords(observation, state, day)
+    if keyword_result != "baseline":
+        return keyword_result
+    llm_result = _detect_scenario_llm(observation, state, day)
+    if llm_result and llm_result != "baseline":
+        return llm_result
+    return keyword_result
 
 
 def compute_consumption_rates(observation: dict, state: dict) -> dict[str, float]:
@@ -212,6 +339,10 @@ def compute_orders(
     scenario = state.get("sc", "baseline")
 
     reserve = max(500, min(1500, days_remaining * 50))
+    if scenario == "black_swan":
+        reserve = max(2000, days_remaining * 100)
+    elif scenario == "inflation":
+        reserve = max(800, days_remaining * 70)
     budget = cash - reserve
     if budget <= 0:
         return actions
@@ -236,6 +367,10 @@ def compute_orders(
         horizon = min(8, max(5, days_remaining))
     if scenario == "supply_crisis":
         horizon = min(9, max(6, days_remaining))
+    elif scenario == "black_swan":
+        horizon = min(4, days_remaining)
+    elif scenario == "feast_or_famine":
+        horizon = min(8, max(5, days_remaining))
 
     urgent_ings: set[str] = set()
     menu_book = {d["name"]: d for d in observation.get("menu_book", [])}
@@ -342,6 +477,14 @@ def compute_staff_level(observation: dict, state: dict, day: int) -> int | None:
             base = max(base - 1, 5)
     elif scenario == "tourist" and observation.get("customer_trend") == "Growing":
         base += 2
+    elif scenario == "black_swan":
+        base = max(base - 2, 3)
+    elif scenario == "health_scare":
+        base = max(base - 1, 5)
+    elif scenario == "premium_pivot":
+        base += 1
+    elif scenario == "silent_drift":
+        base = max(base - 1, 5)
 
     cash = observation.get("cash", 15000)
     if cash < 2000:
@@ -470,6 +613,7 @@ def compute_pricing(observation: dict, state: dict, day: int) -> list[dict]:
     menu_book = {d["name"]: d for d in observation.get("menu_book", [])}
     active = observation.get("active_menu", [])
     ds_hist = state.get("ds", {})
+    scenario = state.get("sc", "baseline")
 
     for dish_name in active:
         if dish_name not in menu_book:
@@ -492,6 +636,15 @@ def compute_pricing(observation: dict, state: dict, day: int) -> list[dict]:
         else:
             target = base
 
+        if scenario == "inflation":
+            target = max(target, base * 1.15)
+        elif scenario == "premium_pivot":
+            target = base * 1.20
+        elif scenario == "health_scare":
+            target = min(target, base * 0.95)
+        elif scenario == "black_swan":
+            target = min(target, base * 0.90)
+
         target = max(base * 0.8, min(base * 1.2, round(target, 2)))
         if abs(target - current) >= 0.5:
             actions.append({"tool": "set_price", "args": {"dish": dish_name, "price": target}})
@@ -502,7 +655,10 @@ def compute_pricing(observation: dict, state: dict, day: int) -> list[dict]:
 def should_run_happy_hour(observation: dict, state: dict, day: int) -> bool:
     if observation.get("cash", 15000) < 2000:
         return False
-    if state.get("sc") == "renovation" and day <= 12:
+    sc = state.get("sc", "baseline")
+    if sc == "renovation" and day <= 12:
+        return False
+    if sc == "premium_pivot":
         return False
     hh = state.get("hh", [])
     if hh and hh[-1] >= day - 1:
@@ -512,6 +668,8 @@ def should_run_happy_hour(observation: dict, state: dict, day: int) -> bool:
 
     dow = observation.get("day_of_week", "")
     weather = observation.get("weather_today", "cloudy")
+    if sc in ("health_scare", "silent_drift", "black_swan"):
+        return True
     if dow in SLOW_DAYS or weather in ("rainy", "stormy"):
         return True
     return False
@@ -539,9 +697,18 @@ def compute_marketing(observation: dict, state: dict, day: int) -> float:
     base = 60.0
     if scenario == "renovation" and day <= 12:
         return 0
-    elif trend == "Declining":
+    elif scenario == "black_swan":
+        return 0
+    elif scenario == "health_scare":
         base = 150
-    elif trend == "Growing":
+    elif scenario == "premium_pivot":
+        base = 100
+    elif scenario == "silent_drift":
+        base = 120
+
+    if trend == "Declining":
+        base = max(base, 150)
+    elif trend == "Growing" and scenario not in ("health_scare", "premium_pivot", "silent_drift"):
         base = 80
     if rep in ("Fair", "Poor"):
         base += 80

@@ -23,7 +23,20 @@ import httpx
 
 Strategy = Callable[[dict, int], list[dict]]
 
-DEFAULT_URL = os.getenv("RESTBENCH_URL", "http://localhost:8001")
+DEFAULT_URL = os.getenv("RESTBENCH_URL")
+
+
+def _request_with_backoff(client, method, url, **kwargs):
+    for attempt in range(15):
+        r = getattr(client, method)(url, **kwargs)
+        if r.status_code == 429:
+            wait = min(2 * attempt, 30)
+            time.sleep(wait)
+            continue
+        r.raise_for_status()
+        return r
+    r.raise_for_status()
+    return r
 
 
 def run_game(
@@ -37,12 +50,11 @@ def run_game(
 ) -> dict:
     transport = httpx.HTTPTransport(retries=3)
     with httpx.Client(base_url=base_url, timeout=60.0, transport=transport) as client:
-        r = client.post("/games", json={
+        r = _request_with_backoff(client, "post", "/games", json={
             "team_name": team_name,
             "scenario": scenario,
             "seed": seed,
         })
-        r.raise_for_status()
         data = r.json()
         game_id = data["game_id"]
         observation = data["observation"]

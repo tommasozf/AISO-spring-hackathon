@@ -15,7 +15,7 @@ import json
 import os
 import sys
 
-import litellm
+import openai
 
 from agents.runner import run_game
 
@@ -43,12 +43,16 @@ Going bankrupt (cash < 0) = -100,000 score. Survival is priority #1.
 
 Use the exact supplier, ingredient, and dish names from the observation."""
 
+client = openai.OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    base_url="http://litellm-production.eba-pvykax23.eu-west-1.elasticbeanstalk.com",
+)
 
 def strategy(observation: dict, day: int) -> list[dict]:
     user_msg = f"Day {day}/30. Here is today's observation:\n\n{json.dumps(observation, indent=2)}"
 
     try:
-        response = litellm.completion(
+        response = client.chat.completions.create(
             model=MODEL,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},

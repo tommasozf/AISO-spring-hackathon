@@ -350,50 +350,114 @@ def compute_staff_level(observation: dict, state: dict, day: int) -> int | None:
     return target if target != current else None
 
 
-# ── Menu ─────────────────────────────────────────────────────
-
 def compute_menu(
-    observation: dict, projections: dict, state: dict, day: int
+    observation: dict,
+    projections: dict,
+    dish_metrics: dict,
+    day: int
 ) -> list[str] | None:
+
     if day <= 1:
         return None
 
-    menu_book = {d["name"]: d for d in observation.get("menu_book", [])}
+    menu_book = {
+        d["name"]: d
+        for d in observation.get("menu_book", [])
+    }
+
     active = observation.get("active_menu", [])
 
-    viable: list[str] = []
-    marginal: list[str] = []
+    dish_scores: list[tuple[float, str]] = []
 
     for dish_name, dish in menu_book.items():
-        min_servings = 999.0
-        for ing in dish.get("ingredients", []):
-            proj = projections.get(ing["ingredient"])
-            if proj and ing["quantity_kg"] > 0:
-                min_servings = min(min_servings, proj["effective"] / ing["quantity_kg"])
-            else:
-                min_servings = 0
-                break
-        if min_servings > 5:
-            viable.append(dish_name)
-        elif min_servings > 0:
-            marginal.append(dish_name)
 
-    new_menu = viable[:]
-    if len(new_menu) < 8:
-        new_menu.extend(marginal[: 8 - len(new_menu)])
+        feasible = True
+        min_servings = 999.0
+
+        for ing in dish.get("ingredients", []):
+
+            proj = projections.get(
+                ing["ingredient"]
+            )
+
+            if not proj:
+                feasible = False
+                break
+
+            if ing["quantity_kg"] <= 0:
+                continue
+
+            servings = (
+                proj["effective"]
+                / ing["quantity_kg"]
+            )
+
+            min_servings = min(
+                min_servings,
+                servings
+            )
+
+        if not feasible or min_servings <= 2:
+            continue
+
+        metrics = dish_metrics.get(
+            dish_name,
+            {}
+        )
+
+        expected_profit = metrics.get(
+            "expected_profit",
+            0
+        )
+
+        margin_pct = metrics.get(
+            "margin_pct",
+            0
+        )
+
+        inventory_pressure = metrics.get(
+            "inventory_pressure",
+            0
+        )
+
+        avg_sales = metrics.get(
+            "avg_sales",
+            0
+        )
+
+        score = (
+            expected_profit
+            + margin_pct * 20
+            + inventory_pressure * 5
+            + avg_sales * 3
+        )
+
+        dish_scores.append(
+            (score, dish_name)
+        )
+
+    dish_scores.sort(reverse=True)
+
+    new_menu = [
+        dish
+        for _, dish in dish_scores[:8]
+    ]
+
     if len(new_menu) < 5:
-        for d in menu_book:
-            if d not in new_menu:
-                new_menu.append(d)
+
+        for dish_name in menu_book:
+
+            if dish_name not in new_menu:
+                new_menu.append(dish_name)
+
             if len(new_menu) >= 5:
                 break
 
     if set(new_menu) != set(active):
         return new_menu
+
     return None
 
-
-# ── Pricing ──────────────────────────────────────────────────
 
 def compute_pricing(observation: dict, state: dict, day: int) -> list[dict]:
     if day < 4:
@@ -431,8 +495,6 @@ def compute_pricing(observation: dict, state: dict, day: int) -> list[dict]:
 
     return actions
 
-
-# ── Promotions ───────────────────────────────────────────────
 
 def should_run_happy_hour(observation: dict, state: dict, day: int) -> bool:
     if observation.get("cash", 15000) < 2000:
@@ -485,8 +547,96 @@ def compute_marketing(observation: dict, state: dict, day: int) -> float:
 
     return min(base, 300, cash * 0.03)
 
+def compute_dish_metrics(
+    observation: dict,
+    projections: dict,
+    state: dict,
+) -> dict[str, dict]:
 
-# ── Main Strategy ────────────────────────────────────────────
+    ingredient_costs = build_ingredient_cost_map(observation)
+
+    ds_hist = state.get("ds", {})
+
+    metrics: dict[str, dict] = {}
+
+    for dish in observation.get("menu_book", []):
+
+        name = dish["name"]
+
+        current_price = dish.get("current_price", dish["base_price"])
+
+        ingredient_cost = 0.0
+
+        for ing in dish.get("ingredients", []):
+
+            unit_cost = ingredient_costs.get(
+                ing["ingredient"],
+                0
+            )
+
+            ingredient_cost += (
+                unit_cost * ing["quantity_kg"]
+            )
+
+        margin = current_price - ingredient_cost
+
+        margin_pct = (
+            margin / current_price
+            if current_price > 0 else 0
+        )
+
+        sales_hist = ds_hist.get(name, [])
+
+        avg_sales = (
+            sum(sales_hist) / len(sales_hist)
+            if sales_hist else 0
+        )
+
+        expected_profit = margin * avg_sales
+
+        inventory_pressure = 0.0
+
+        for ing in dish.get("ingredients", []):
+
+            proj = projections.get(ing["ingredient"])
+
+            if not proj:
+                continue
+
+            shelf = proj.get("shelf_life", 14)
+
+            # reward dishes using risky inventory
+            if shelf <= 3:
+                inventory_pressure += 2
+            elif shelf <= 5:
+                inventory_pressure += 1
+
+        metrics[name] = {
+            "ingredient_cost": round(ingredient_cost, 2),
+            "margin": round(margin, 2),
+            "margin_pct": round(margin_pct, 2),
+            "avg_sales": round(avg_sales, 2),
+            "expected_profit": round(expected_profit, 2),
+            "inventory_pressure": inventory_pressure,
+        }
+
+    return metrics
+
+
+def build_ingredient_cost_map(observation: dict) -> dict[str, float]:
+    costs: dict[str, float] = {}
+
+    for supplier in observation.get("supplier_catalog", []):
+        for ingredient, price in supplier.get("ingredients", {}).items():
+
+            # keep cheapest supplier
+            if ingredient not in costs:
+                costs[ingredient] = price
+            else:
+                costs[ingredient] = min(costs[ingredient], price)
+
+    return costs
+
 
 def strategy(observation: dict, day: int) -> list[dict]:
     actions: list[dict] = []
@@ -503,6 +653,12 @@ def strategy(observation: dict, day: int) -> list[dict]:
         rates = _day1_rates(observation)
 
     projections = project_inventory(observation, rates)
+
+    dish_metrics = compute_dish_metrics(
+        observation,
+        projections,
+        state
+    )
 
     menu_book = {d["name"]: d for d in observation.get("menu_book", [])}
     for dish in observation.get("active_menu", []):
@@ -546,4 +702,4 @@ def strategy(observation: dict, day: int) -> list[dict]:
 
 if __name__ == "__main__":
     print("Running SmartRule agent...")
-    result = run_game(strategy, team_name="ItalianWaiters", seed=42)
+    result = run_game(strategy, team_name="italian_waiters", seed=88, scenario="tourist_season")

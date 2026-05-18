@@ -31,10 +31,10 @@ Available tools for you:
 - save_notes: {"tool": "save_notes", "args": {"text": "..."}} (Leave notes for yourself for tomorrow. Max 4000 chars.)
 
 Guidelines:
-1. Pay close attention to "alerts". If a supplier is down, consider removing dishes that rely on them.
+1. Pay close attention to "alerts". If a supplier is down, consider removing dishes that rely on them. DO NOT change the menu otherwise. Changing the menu ruins kitchen efficiency.
 2. If "dishes_unavailable_at" shows dishes ran out, it means we lost sales. The rule-based system is trying to reorder, but you might want to raise prices on those dishes to slow demand, or remove them temporarily.
 3. If reputation is dropping, consider running a happy hour or a daily special to recover.
-4. If wait times are high or walkouts are occurring, you might want to raise prices to control demand, as the rule-based system caps staff at 15.
+4. If walkout_band is 'Some' or 'Many', your prices are too low! You should gradually raise prices on active dishes (by 0.50 to 1.50 EUR) to gently cool demand. Do NOT jump straight to the maximum allowed limit, as this causes demand to drop to zero! If walkouts are 'None', you can safely lower prices slightly to build reputation.
 5. Respond ONLY with a JSON array of tool calls. No markdown block formatting, no explanation. Just the array.
 """
 
@@ -117,16 +117,14 @@ def rule_based_strategy(obs: dict, day: int) -> list[dict]:
         pending[po["ingredient"]] = pending.get(po["ingredient"], 0) + po["quantity_kg"]
 
     # 1. Staffing Logic
-    # Weekend = busier, need more staff.
-    day_of_week = obs.get("day_of_week", "Monday")
-    weather = obs.get("weather_today", "sunny")
-    
     base_staff = 8
-    if day_of_week in ["Friday", "Saturday"]:
+    service_summary = obs.get("service_summary") or {}
+    walkout_band = service_summary.get("walkout_band", "None")
+    if walkout_band == "Many":
         base_staff += 2
-    if weather == "sunny":
+    elif walkout_band == "Some":
         base_staff += 1
-    elif weather in ["rainy", "stormy"]:
+    elif walkout_band == "None":
         base_staff -= 1
         
     # Cap staff to save money if we are poor
@@ -160,7 +158,14 @@ def rule_based_strategy(obs: dict, day: int) -> list[dict]:
     budget = cash - 1500  
     
     # Target stock levels
-    TARGET_STOCK = 6.0 
+    service_summary = obs.get("service_summary") or {}
+    covers_yesterday = service_summary.get("total_covers", 0)
+    if covers_yesterday > 100:
+        TARGET_STOCK = 10.0
+    elif covers_yesterday < 50:
+        TARGET_STOCK = 4.0
+    else:
+        TARGET_STOCK = 6.0 
 
     for ingredient in required_ingredients:
         if ingredient not in cheapest_supplier:

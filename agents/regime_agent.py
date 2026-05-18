@@ -52,6 +52,13 @@ STAFF_DOW_BASE = {
     "Thursday": 8, "Friday": 10, "Saturday": 11, "Sunday": 9,
 }
 
+# Expected demand by day-of-week, normalised to weekly mean ≈ 1.0.
+# Used to project forward demand for inventory safety horizons.
+DOW_DEMAND = {
+    "Monday": 0.75, "Tuesday": 0.80, "Wednesday": 0.85,
+    "Thursday": 0.95, "Friday": 1.25, "Saturday": 1.45, "Sunday": 0.95,
+}
+
 REGIMES = (
     "tourist",
     "demand_drought",
@@ -131,6 +138,9 @@ DEFAULT_STATE = {
     "regime_history": [],         # list of {"d": day, "r": {regime: sev}}
     "supplier_price_snapshot": {},  # "<sup>:<ing>" -> price (first seen)
     "delivery_shortfall_log": [],  # [{"d": day, "sup": name, "frac": delivered/ordered}]
+    "dish_sales": {},             # dish_name -> last 7 days [qty, qty, ...]
+    "sticky_regimes": {},         # regime_name -> day_until_inclusive (e.g. {"capacity_limited": 14})
+    "supplier_reliability": {},   # supplier_name -> {"shortfalls": int, "successes": int}
 }
 
 
@@ -168,11 +178,15 @@ def serialize_state(state: dict) -> str:
         "regime_history": state.get("regime_history", [])[-7:],
         "supplier_price_snapshot": state.get("supplier_price_snapshot", {}),
         "delivery_shortfall_log": state.get("delivery_shortfall_log", [])[-5:],
+        "dish_sales": {k: v[-7:] for k, v in (state.get("dish_sales") or {}).items()},
+        "sticky_regimes": state.get("sticky_regimes", {}),
+        "supplier_reliability": state.get("supplier_reliability", {}),
     }
     raw = json.dumps(payload, separators=(",", ":"))
     if len(raw) > 3800:
         payload["regime_history"] = payload["regime_history"][-3:]
         payload["delivery_shortfall_log"] = payload["delivery_shortfall_log"][-3:]
+        payload["dish_sales"] = {k: v[-3:] for k, v in payload["dish_sales"].items()}
         raw = json.dumps(payload, separators=(",", ":"))
     return raw[:3900]
 
@@ -225,20 +239,37 @@ def update_emas(state: dict, observation: dict, menu_dict: dict) -> None:
             cur = ema_burn.get(ing["ingredient"], 0.5)
             ema_burn[ing["ingredient"]] = max(cur, cur * 1.5)
 
+    # Per-dish sales history (last 7 days) — drives per-dish pricing.
+    ds_hist = state.setdefault("dish_sales", {})
+    for dish, qty in dishes_sold.items():
+        ds_hist.setdefault(dish, []).append(int(qty))
+        ds_hist[dish] = ds_hist[dish][-7:]
+
 
 def detect_outages(state: dict, observation: dict, day: int) -> None:
     outage = set(state.get("outage_suppliers") or [])
     shortfall_log = state.get("delivery_shortfall_log", [])
+    rel = state.setdefault("supplier_reliability", {})
+    seen_entries = {(s.get("sup"), s.get("d")) for s in shortfall_log}
     for entry in observation.get("delivery_history") or []:
+        sup = entry.get("supplier")
         ordered = entry.get("ordered_kg", 0) or 0
         delivered = entry.get("delivered_kg", 0) or 0
-        if ordered > 0 and delivered < ordered * 0.5:
-            outage.add(entry.get("supplier"))
-            shortfall_log.append({
-                "d": day,
-                "sup": entry.get("supplier"),
-                "frac": round(delivered / max(ordered, 1), 2),
-            })
+        if ordered <= 0 or not sup:
+            continue
+        r = rel.setdefault(sup, {"shortfalls": 0, "successes": 0})
+        if delivered < ordered * 0.5:
+            outage.add(sup)
+            key = (sup, entry.get("day", day))
+            if key not in seen_entries:
+                r["shortfalls"] = r.get("shortfalls", 0) + 1
+                shortfall_log.append({
+                    "d": entry.get("day", day),
+                    "sup": sup,
+                    "frac": round(delivered / max(ordered, 1), 2),
+                })
+        elif delivered >= ordered * 0.95:
+            r["successes"] = r.get("successes", 0) + 1
     for alert in observation.get("alerts") or []:
         text = (alert or "").lower()
         if any(k in text for k in KEYWORDS["supply_crisis"]):
@@ -247,6 +278,43 @@ def detect_outages(state: dict, observation: dict, day: int) -> None:
                     outage.add(sup["name"])
     state["outage_suppliers"] = sorted(outage)
     state["delivery_shortfall_log"] = shortfall_log[-10:]
+    state["supplier_reliability"] = rel
+
+
+# Parse a "for N weeks/days" duration from alert text, return day-offset (default 12).
+def _parse_alert_duration(text: str) -> int:
+    import re
+    text = (text or "").lower()
+    m = re.search(r"for (\d+)\s*(day|week|month)", text)
+    if not m:
+        if "two weeks" in text or "2 weeks" in text:
+            return 14
+        if "one week" in text or "1 week" in text:
+            return 7
+        return 12  # default for renovation-like events
+    n = int(m.group(1))
+    unit = m.group(2)
+    return n * (1 if unit == "day" else 7 if unit == "week" else 30)
+
+
+def update_sticky_regimes(state: dict, observation: dict, day: int) -> None:
+    """When a long-lived regime alert fires, persist it for the expected duration."""
+    sticky = state.setdefault("sticky_regimes", {})
+    # Expire old.
+    for r in list(sticky):
+        if sticky[r] < day:
+            del sticky[r]
+    # capacity_limited usually has a duration in its alert ("for two weeks", "for 12 days").
+    for alert in observation.get("alerts") or []:
+        text = (alert or "").lower()
+        if any(k in text for k in KEYWORDS["capacity_limited"]):
+            until = day + _parse_alert_duration(text)
+            sticky["capacity_limited"] = max(sticky.get("capacity_limited", 0), until)
+        # supply_crisis with named "extended" or "long" outage also persists.
+        if "extended" in text or "long" in text or "indefinite" in text:
+            if any(k in text for k in KEYWORDS["supply_crisis"]):
+                until = day + _parse_alert_duration(text or "for 8 days")
+                sticky["supply_crisis"] = max(sticky.get("supply_crisis", 0), until)
 
 
 def snapshot_supplier_prices(state: dict, observation: dict) -> dict[str, float]:
@@ -365,8 +433,16 @@ def classify_capacity_limited(obs: dict, state: dict, day: int) -> tuple[float, 
     if kw > 0:
         reasons.append(f"alert_kw={kw:.2f}")
         score = max(score, kw)
-    # If util peak is at/over 1.0 with lots of walkouts, that's pressure, not capacity
-    # constraint per se — true capacity constraint is observed in covers ceiling vs EMA.
+    # Sticky: alert may only fire on day 1, but the constraint persists for weeks.
+    sticky_until = (state.get("sticky_regimes") or {}).get("capacity_limited", 0)
+    if sticky_until >= day:
+        # Decay from 0.8 on day 1 to 0.4 as we approach end.
+        days_left = sticky_until - day + 1
+        total = sticky_until - (sticky_until - days_left)  # rough span heuristic
+        # Severity tapers slightly but stays above LOW threshold throughout.
+        sticky_score = 0.5 + 0.3 * min(days_left / 7.0, 1.0)
+        reasons.append(f"sticky_until=d{sticky_until}->{sticky_score:.2f}")
+        score = max(score, sticky_score)
     return score, reasons
 
 
@@ -582,24 +658,51 @@ def staffing_target(owner: str, t: str, knobs: dict, obs: dict, state: dict, day
 def pricing_multipliers(
     owner: str, t: str, knobs: dict, obs: dict, state: dict
 ) -> dict[str, float]:
-    """Return {dish: multiplier} in [0.81, 1.19]."""
+    """Return {dish: multiplier} in [0.81, 1.19].
+
+    Combines a regime-wide tilt with a per-dish nudge driven by recent sales
+    history (smart_rule's elasticity proxy: high-sale dishes can sustain a
+    markup, low-sale dishes need a discount to clear).
+    """
     out: dict[str, float] = {}
     active = obs.get("active_menu") or []
+    if not active:
+        return out
+
+    # 1. Regime-wide tilt.
     if owner == "cost_inflation":
         mk = knobs.get("markup_tier") or t
-        m = 1.0 + tier_value(mk, low=0.05, med=0.10, high=0.15)
+        regime_tilt = tier_value(mk, low=0.05, med=0.10, high=0.15)
     elif owner == "reputation_crisis":
         d = knobs.get("discount_tier") or t
-        m = 1.0 - tier_value(d, low=0.05, med=0.10, high=0.15)
+        regime_tilt = -tier_value(d, low=0.05, med=0.10, high=0.15)
     elif owner == "tourist":
-        m = 1.0 + tier_value(t, low=0.04, med=0.08, high=0.12)
+        regime_tilt = tier_value(t, low=0.04, med=0.08, high=0.12)
     elif owner == "demand_drought":
-        m = 1.0 - tier_value(t, low=0.04, med=0.08, high=0.12)
+        regime_tilt = -tier_value(t, low=0.04, med=0.08, high=0.12)
     else:
-        return {}
-    m = max(0.81, min(1.19, m))
+        regime_tilt = 0.0
+
+    # 2. Per-dish sale-history nudge.
+    ds_hist = state.get("dish_sales", {})
     for dish in active:
-        out[dish] = m
+        hist = ds_hist.get(dish, [])
+        avg = sum(hist) / len(hist) if hist else 0.0
+        if avg > 15:
+            nudge = 0.10
+        elif avg > 10:
+            nudge = 0.05
+        elif avg > 5:
+            nudge = 0.0
+        elif 0 < avg <= 3:
+            nudge = -0.08
+        else:
+            nudge = 0.0  # no data → leave at base
+        # baseline (no regime tilt) still adjusts on sale history alone.
+        m = 1.0 + regime_tilt + nudge
+        m = max(0.81, min(1.19, m))
+        if abs(m - 1.0) >= 0.02:
+            out[dish] = m
     return out
 
 
@@ -625,6 +728,9 @@ def marketing_amount(owner: str, t: str, knobs: dict, obs: dict, state: dict, da
     days_remaining = obs.get("days_remaining", 30)
     if days_remaining <= 3:
         amt = max(0, amt - 50)
+    # Cash-fraction cap — never spend more than 3% of cash on marketing in one day.
+    cash_cap = int(cash * 0.03)
+    amt = min(amt, max(cash_cap, 30))
     return max(0, min(500, amt))
 
 
@@ -662,6 +768,33 @@ def pick_daily_special(owner: str, t: str, knobs: dict, obs: dict, state: dict) 
     if not candidates:
         return None
     menu_book = {m["name"]: m for m in (obs.get("menu_book") or [])}
+
+    # Spoilage override (applies regardless of owner): if any active dish has an
+    # ingredient that expires in <=2 days with enough kg to matter, push it.
+    expiring_kg: dict[str, float] = {}
+    for inv in obs.get("inventory") or []:
+        for batch in inv.get("batches") or []:
+            if batch.get("expires_in_days", 99) <= 2:
+                expiring_kg[inv["ingredient"]] = (
+                    expiring_kg.get(inv["ingredient"], 0.0) + batch.get("quantity_kg", 0.0)
+                )
+    if expiring_kg:
+        ema = state.get("ema_burn", {})
+        def spoil_pressure(dish: str) -> float:
+            recipe = menu_book.get(dish)
+            if not recipe:
+                return 0.0
+            score = 0.0
+            for ing in recipe["ingredients"]:
+                kg = expiring_kg.get(ing["ingredient"], 0.0)
+                burn = max(ema.get(ing["ingredient"], 0.5), 0.1)
+                if kg > burn * 0.5:  # meaningful surplus
+                    score += kg / burn
+            return score
+        scored = [(d, spoil_pressure(d)) for d in candidates]
+        scored.sort(key=lambda x: -x[1])
+        if scored[0][1] > 1.0:
+            return scored[0][0]
 
     if owner == "supply_crisis":
         # Push a dish that uses ingredients we have plenty of.
@@ -766,8 +899,24 @@ def build_orders(
     if covers_ema > 0 and covers_ema < 90:
         demand_scalar = max(covers_ema / 140.0, 0.5)
 
+    # Pre-peak horizon bump: Wed/Thu/Fri see Sat coming, want extra slack.
+    pre_peak = today_dow in ("Wednesday", "Thursday", "Friday")
+    if pre_peak:
+        safety_days += 1
+
+    # Expected demand multiplier averaged over the coming order horizon.
+    # Forward-looks safety_days into the week and averages DOW_DEMAND.
+    today_idx = DOW_INDEX.get(today_dow, 0)
+    horizon = max(safety_days + 2, 3)
+    forward_factors = [
+        DOW_DEMAND.get(DAYS_OF_WEEK[(today_idx + k) % 7], 1.0)
+        for k in range(horizon)
+    ]
+    dow_demand_factor = sum(forward_factors) / max(len(forward_factors), 1)
+
     ema_burn = state.get("ema_burn", {})
     bootstrap_burn = _bootstrap_burn(observation, menu_dict)
+    reliability = state.get("supplier_reliability", {})
 
     seen_ings: set[str] = set()
     for sup in catalog:
@@ -786,7 +935,7 @@ def build_orders(
             ema_burn.get(ingredient, 0.0),
             bootstrap_burn.get(ingredient, 0.0),
             0.3,
-        ) * demand_scalar
+        ) * demand_scalar * dow_demand_factor
         burn = avg_burn * service_level
 
         on_hand = inventory.get(ingredient, {}).get("total_kg", 0.0)
@@ -800,9 +949,15 @@ def build_orders(
             d2 = days_until_next_delivery(
                 today_dow, sup["lead_time_days"], sup["delivery_days"], from_offset=d1
             )
+            # Risk-adjusted price: each historical shortfall adds 8% to the effective
+            # cost so we naturally prefer reliable suppliers when prices are close.
+            r = reliability.get(sup["name"], {})
+            shortfalls = r.get("shortfalls", 0)
+            risk_penalty = 1.0 + 0.08 * shortfalls
             candidate_quotes.append({
                 "name": sup["name"],
                 "price": sup["ingredients"][ingredient],
+                "eff_price": sup["ingredients"][ingredient] * risk_penalty,
                 "min": sup["min_order_kg"],
                 "d1": d1,
                 "d2": d2,
@@ -813,10 +968,10 @@ def build_orders(
         days_to_empty = on_hand / max(burn, 0.1)
         sufficient = [q for q in candidate_quotes if q["d1"] <= max(days_to_empty, 2)]
         if sufficient:
-            sufficient.sort(key=lambda q: q["price"])
+            sufficient.sort(key=lambda q: q["eff_price"])
             primary = sufficient[0]
         else:
-            candidate_quotes.sort(key=lambda q: (q["d1"], q["price"]))
+            candidate_quotes.sort(key=lambda q: (q["d1"], q["eff_price"]))
             primary = candidate_quotes[0]
 
         target_kg = burn * (primary["d2"] + safety_days)
@@ -1135,6 +1290,7 @@ def strategy(observation: dict, day: int) -> list[dict]:
     update_emas(state, observation, menu_dict)
     detect_outages(state, observation, day)
     snapshot_supplier_prices(state, observation)
+    update_sticky_regimes(state, observation, day)
 
     # 2. Classify
     severities, reasons = classify_regimes(observation, state, day)

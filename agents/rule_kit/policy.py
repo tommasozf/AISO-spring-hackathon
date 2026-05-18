@@ -159,11 +159,21 @@ def _choose_menu(obs: dict, state: AgentState) -> list:
 # ---- staffing ----
 
 def _staff_for(expected_covers_today: float, obs: dict) -> int:
-    # Heuristic: ~12 covers per staff per day at default kitchen speed.
-    target = int(round(expected_covers_today / 12.0)) + 2
-    target = max(3, min(15, target))
+    """
+    Staff sizing heuristic.
+
+    Empirically ~12 covers per staff per day, but +2 was too aggressive — it
+    pushed us to 15 staff on busy-day forecasts. €120/staff/day adds up fast.
+    Now: covers/14 + 1, capped at 12 (not 15) for normal ops. Hard limit 15
+    only via the API cap.
+    """
+    target = int(round(expected_covers_today / 14.0)) + 1
+    target = max(3, min(12, target))
     if safety.cash_emergency(obs):
         target = max(3, target - 2)
+    # Defensive cash floor: if cash < 5000, don't INCREASE staff above current
+    if (obs.get("cash") or 0) < 5000:
+        target = min(target, obs.get("staff_level") or target)
     return target
 
 

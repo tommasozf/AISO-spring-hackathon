@@ -33,14 +33,17 @@ DOW_MULT = {
     "Sunday": 1.05,
 }
 
-PRIOR_BASE_COVERS = 110.0  # busy days hit 130-180+, 90 was too pessimistic
-# Reputation multiplier — softened. The previous Poor=0.55 caused a death
-# spiral: forecast collapsed → staff cut → walkouts → rep dropped further.
-# Real-world data (Day 23 Tue "Poor" rep: actual covers 179) shows demand
-# barely halves even at Poor reputation.
+PRIOR_BASE_COVERS = 95.0  # reverted from 110 — let p75-of-recent do the
+                          # heavy lifting once we have history. 110 + p75 +
+                          # softer rep_mult stacked → over-forecast on busy
+                          # days → over-staffed AND over-ordered.
+# Reputation multiplier — moderately softened. Original 0.55–1.10 caused a
+# death spiral (forecast collapsed → staff cut → walkouts → rep dropped further).
+# First fix went too far (0.85 floor) and made us over-confident. Compromise:
+# Poor reputation still trims demand, but less aggressively than before.
 REP_MULT = {
-    "Poor": 0.85, "Fair": 0.95, "Good": 1.00,
-    "Very Good": 1.05, "Excellent": 1.10,
+    "Poor": 0.75, "Fair": 0.85, "Good": 0.95,
+    "Very Good": 1.00, "Excellent": 1.05,
 }
 
 # Forecast accuracy degrades: 85%, 70%, 55%. Wider safety multiplier on later days.

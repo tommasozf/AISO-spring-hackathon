@@ -23,8 +23,10 @@ from .state import AgentState
 
 TARGET_DAYS_COVER = 4
 MIN_DAYS_COVER = 2          # trip-wire for "panic order"
-SAFETY_MULTIPLIER = 1.50    # over-order this much (also compensates for
-                            # underestimated daily_usage from uniform dish mix)
+SAFETY_MULTIPLIER = 1.20    # reverted from 1.50 — combined with the pending
+                            # window fix and higher forecasts, 1.50 caused
+                            # over-ordering (1139 kg vs 871 kg in v1) →
+                            # cash drained to €54 by day 28.
 SUPPLIER_RELIABILITY_FLOOR = 0.5  # don't order from suppliers below this
 
 # Only count pending orders that arrive within this many days when computing

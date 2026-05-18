@@ -102,6 +102,23 @@ KEYWORDS = {
 TIER_BANDS = (("high", 0.70), ("med", 0.45), ("low", 0.20), ("off", 0.0))
 
 # ---------------------------------------------------------------------------
+# Tuning toggles — env-var flags so we can A/B compare against the current
+# behaviour without code edits between runs. Each defaults OFF.
+
+def _flag(name: str) -> bool:
+    return os.environ.get(name, "") not in ("", "0", "false", "False")
+
+# F1: require stronger covers ratio (or alert kw) before tourist regime fires.
+TUNE_TOURIST_HARDER = _flag("TUNE_TOURIST_HARDER")
+# F2: marketing/HH suppression only fires at MED/HIGH tier, not LOW.
+TUNE_NO_LOW_SUPPRESS = _flag("TUNE_NO_LOW_SUPPRESS")
+# F3: drop "any alert" anomaly trigger; require Many walkouts not Some.
+TUNE_TIGHT_ANOMALY = _flag("TUNE_TIGHT_ANOMALY")
+# S1: smart_rule-style urgency tier in inventory ordering (allows up to 2 orders
+# per ingredient when urgency is critical or day<=3).
+TUNE_URGENCY_ORDERS = _flag("TUNE_URGENCY_ORDERS")
+
+# ---------------------------------------------------------------------------
 # Observability
 
 DEBUG = os.environ.get("REGIME_DEBUG", "") not in ("", "0", "false")
@@ -370,10 +387,23 @@ def classify_tourist(obs: dict, state: dict, day: int) -> tuple[float, list[str]
     yest_covers = (obs.get("service_summary") or {}).get("total_covers", 0)
     if covers_ema > 20 and yest_covers > 0:
         ratio = yest_covers / max(covers_ema, 1.0)
-        if ratio > 1.25:
-            r_score = min(1.0, (ratio - 1.0) * 1.2)
-            reasons.append(f"covers_ratio={ratio:.2f}->{r_score:.2f}")
-            score = max(score, r_score)
+        # F1: harder threshold — normal weekend Fri/Sat lifts covers ~1.3x without
+        # being a tourist surge. Only fire on ratio>1.5 (with weak signal) or
+        # ratio>2.0 (strong stand-alone). Below 1.5, ignore.
+        if TUNE_TOURIST_HARDER:
+            if ratio > 2.0:
+                r_score = min(1.0, (ratio - 1.5) * 1.0)
+                reasons.append(f"covers_ratio={ratio:.2f}->{r_score:.2f}(hard)")
+                score = max(score, r_score)
+            elif ratio > 1.5 and kw > 0:
+                r_score = min(1.0, (ratio - 1.3) * 0.8)
+                reasons.append(f"covers_ratio={ratio:.2f}+kw->{r_score:.2f}")
+                score = max(score, r_score)
+        else:
+            if ratio > 1.25:
+                r_score = min(1.0, (ratio - 1.0) * 1.2)
+                reasons.append(f"covers_ratio={ratio:.2f}->{r_score:.2f}")
+                score = max(score, r_score)
     trend = obs.get("customer_trend") or "Stable"
     if trend == "Growing":
         score = min(1.0, score + 0.1)
@@ -504,8 +534,20 @@ def classify_unknown_anomaly(
     # 1. Alerts present but no named regime crossed LOW threshold.
     alerts = obs.get("alerts") or []
     if alerts and max(named_severities.values(), default=0.0) < 0.2:
-        reasons.append(f"alerts={len(alerts)}_unmatched")
-        score = max(score, 0.5)
+        # F3: only fire if the alert text doesn't match ANY known keyword set.
+        # Routine alerts ("Friday is going to be busy", weather hints, etc) shouldn't
+        # trip anomaly.
+        if TUNE_TIGHT_ANOMALY:
+            text = _alerts_text(obs).lower()
+            all_kws = set()
+            for kws in KEYWORDS.values():
+                all_kws.update(kws)
+            if not any(k in text for k in all_kws):
+                reasons.append(f"alerts={len(alerts)}_truly_unmatched")
+                score = max(score, 0.5)
+        else:
+            reasons.append(f"alerts={len(alerts)}_unmatched")
+            score = max(score, 0.5)
     # 2. >2 sigma cover swing without tourist/drought claiming it.
     covers_var = state.get("covers_var", 0.0)
     covers_ema = state.get("covers_ema", 0.0)
@@ -519,9 +561,16 @@ def classify_unknown_anomaly(
             score = max(score, zs)
     # 3. Walkouts spike without reputation_crisis claiming it.
     wko = (obs.get("service_summary") or {}).get("walkout_band") or "None"
-    if wko in ("Some", "Many") and named_severities.get("reputation_crisis", 0) < 0.3:
-        reasons.append(f"walkouts={wko}_unexplained")
-        score = max(score, 0.5)
+    # F3: only "Many" walkouts indicate something abnormal; "Some" is just
+    # capacity pressure on a busy night (normal for Fri/Sat).
+    if TUNE_TIGHT_ANOMALY:
+        if wko == "Many" and named_severities.get("reputation_crisis", 0) < 0.3:
+            reasons.append("walkouts=Many_unexplained")
+            score = max(score, 0.5)
+    else:
+        if wko in ("Some", "Many") and named_severities.get("reputation_crisis", 0) < 0.3:
+            reasons.append(f"walkouts={wko}_unexplained")
+            score = max(score, 0.5)
     return score, reasons
 
 
@@ -550,8 +599,14 @@ def pick_owner(domain: str, severities: dict[str, float]) -> str:
     return "baseline"
 
 
-def is_suppressed(domain: str, owner: str) -> bool:
-    return (domain, owner) in SUPPRESSES
+def is_suppressed(domain: str, owner: str, tier_name: str = "high") -> bool:
+    """Suppression rules. With TUNE_NO_LOW_SUPPRESS, LOW tier no longer suppresses
+    — only MED/HIGH severity warrants killing marketing/HH outright."""
+    if (domain, owner) not in SUPPRESSES:
+        return False
+    if TUNE_NO_LOW_SUPPRESS and tier_name == "low":
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -709,7 +764,7 @@ def pricing_multipliers(
 # ---- marketing ----
 
 def marketing_amount(owner: str, t: str, knobs: dict, obs: dict, state: dict, day: int) -> int:
-    if is_suppressed("marketing", owner):
+    if is_suppressed("marketing", owner, t):
         return 0
     cash = obs.get("cash", 15000)
     if cash < 2000:
@@ -737,7 +792,7 @@ def marketing_amount(owner: str, t: str, knobs: dict, obs: dict, state: dict, da
 # ---- happy hour ----
 
 def should_happy_hour(owner: str, t: str, knobs: dict, obs: dict, state: dict, day: int) -> bool:
-    if is_suppressed("happy_hour", owner):
+    if is_suppressed("happy_hour", owner, t):
         return False
     if obs.get("cash", 15000) < 2000:
         return False
@@ -844,6 +899,8 @@ def menu_choice(
             if ok:
                 viable.append(name)
         if len(viable) >= 5 and set(viable) != set(active):
+            sold = (obs.get("service_summary") or {}).get("dishes_sold") or {}
+            viable.sort(key=lambda d: -sold.get(d, 0))
             return viable[:10]
         return None
     if owner == "capacity_limited":
@@ -869,6 +926,7 @@ def build_orders(
 ) -> list[dict]:
     actions: list[dict] = []
     today_dow = observation.get("day_of_week") or "Monday"
+    day = observation.get("day", 1)
     days_remaining = observation.get("days_remaining", 30)
     safety_days = int(inv_p.get("safety_days", 2))
     service_level = float(inv_p.get("service_level", 1.5))
@@ -993,8 +1051,12 @@ def build_orders(
         if phase == "endgame":
             cap_qty = burn * usable_days
             if cap_qty < primary["min"]:
-                continue
-            order_qty = min(order_qty, cap_qty)
+                if on_hand + pending < burn * 1.0:
+                    order_qty = primary["min"]
+                else:
+                    continue
+            else:
+                order_qty = min(order_qty, cap_qty)
 
         cost = order_qty * primary["price"]
         if cost > budget:
@@ -1014,6 +1076,38 @@ def build_orders(
         budget -= cost
         used_suppliers_per_ing.setdefault(ingredient, set()).add(primary["name"])
 
+        # S1: urgency-tiered double-ordering — when stock is critically low or in
+        # the early game (day<=3), back the primary order with a second from a
+        # different supplier to hedge delivery risk.
+        urgency_double = (
+            TUNE_URGENCY_ORDERS
+            and not diversify  # supply_crisis path already handles backup below
+            and len(candidate_quotes) >= 2
+            and budget > 0
+            and (days_to_empty < 2 or day <= 3)
+        )
+        if urgency_double:
+            backups = [
+                q for q in candidate_quotes
+                if q["name"] not in used_suppliers_per_ing[ingredient]
+            ]
+            if backups:
+                backups.sort(key=lambda q: (q["d1"], q["eff_price"]))
+                b = backups[0]
+                qty = max(b["min"], shortfall * 0.35)
+                bcost = qty * b["price"]
+                if bcost <= budget and qty <= spoil_cap * 1.2:
+                    actions.append({
+                        "tool": "place_order",
+                        "args": {
+                            "supplier": b["name"],
+                            "ingredient": ingredient,
+                            "quantity_kg": round(qty, 1),
+                        },
+                    })
+                    budget -= bcost
+                    used_suppliers_per_ing[ingredient].add(b["name"])
+
         # Diversification: place a smaller backup order from a different supplier.
         if diversify and len(candidate_quotes) >= 2 and budget > 0:
             backups = [
@@ -1025,7 +1119,7 @@ def build_orders(
                 b = backups[0]
                 qty = max(b["min"], shortfall * 0.4)
                 bcost = qty * b["price"]
-                if bcost <= budget and qty * avg_burn * 0.0 + qty <= spoil_cap * 1.2:
+                if bcost <= budget and qty <= spoil_cap * 1.2:
                     actions.append({
                         "tool": "place_order",
                         "args": {
@@ -1348,7 +1442,7 @@ def strategy(observation: dict, day: int) -> list[dict]:
             (m["current_price"] for m in (observation.get("menu_book") or []) if m["name"] == dish),
             base,
         )
-        if abs(new_price - current) >= 0.3:
+        if abs(new_price - current) >= max(0.15, base * 0.03):
             actions.append({"tool": "set_price", "args": {"dish": dish, "price": new_price}})
 
     # Marketing
@@ -1378,7 +1472,7 @@ def strategy(observation: dict, day: int) -> list[dict]:
 
     # 7. Observability — terse stdout line
     own_str = " ".join(
-        f"{dom}={reg}({t[0].upper()}{',suppr' if is_suppressed(dom, reg) else ''})"
+        f"{dom}={reg}({t[0].upper()}{',suppr' if is_suppressed(dom, reg, t) else ''})"
         for dom, (reg, t) in owners.items()
         if reg != "baseline"
     )

@@ -20,12 +20,16 @@ from __future__ import annotations
 import os
 
 from agents.runner import run_game
+from agents.rule_kit import telemetry
 from agents.rule_kit.policy import decide_actions
 from agents.rule_kit.state import AgentState
 
 # CHANGE THIS to your real team name (or set TEAM_NAME env var).
 # The leaderboard groups by team name — keep it consistent across every game.
 DEFAULT_TEAM_NAME = "CHANGE_ME"
+
+# Telemetry on by default. Set TELEMETRY=0 to disable.
+TELEMETRY_ENABLED = os.environ.get("TELEMETRY", "1") != "0"
 
 
 def strategy(observation: dict, day: int) -> list[dict]:
@@ -40,12 +44,25 @@ def strategy(observation: dict, day: int) -> list[dict]:
     # 2) Roll yesterday's service_summary into history (idempotent)
     state.update_from_observation(observation)
 
-    # 3) Decide actions for today
-    actions = decide_actions(observation, day, state)
+    # 3) Decide actions for today; `record` captures decision rationale for telemetry
+    record: dict = {}
+    actions = decide_actions(observation, day, state, record=record)
 
     # 4) Always overwrite notes last so it captures the latest state.
     actions = [a for a in actions if a.get("tool") != "save_notes"]
     actions.append({"tool": "save_notes", "args": {"text": state.to_notes()}})
+
+    # 5) Telemetry — append one JSON line per turn to runs/<team>_<ts>_t<tid>.jsonl
+    if TELEMETRY_ENABLED:
+        try:
+            telemetry.record_turn(
+                observation,
+                actions,
+                record,
+                team=os.environ.get("TEAM_NAME", DEFAULT_TEAM_NAME),
+            )
+        except Exception as e:
+            print(f"[telemetry] failed: {e}")
 
     return actions
 

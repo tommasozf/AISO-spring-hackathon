@@ -102,9 +102,22 @@ class AgentState:
     # ---- empirical features ----
 
     def empirical_base_covers(self) -> float:
+        """
+        Base demand estimate from history.
+
+        Uses the 75th percentile of the last 7 days rather than the simple
+        average. The average gets dragged down by stockout-induced low-cover
+        days — using a high percentile means we forecast (and prep) for the
+        demand we COULD serve, not the demand our crashes let through.
+        """
         if not self.history:
             return 0.0
-        return sum(r.covers for r in self.history) / len(self.history)
+        recent = sorted(r.covers for r in self.history[-7:])
+        if not recent:
+            return 0.0
+        # p75: index = ceil(0.75 * n) - 1, clamped
+        idx = max(0, min(len(recent) - 1, int(round(0.75 * (len(recent) - 1)))))
+        return float(recent[idx])
 
     # ---- serialize ----
 

@@ -33,10 +33,14 @@ DOW_MULT = {
     "Sunday": 1.05,
 }
 
-PRIOR_BASE_COVERS = 90.0  # ballpark — naive_rule scores ~-15k so this is rough
+PRIOR_BASE_COVERS = 110.0  # busy days hit 130-180+, 90 was too pessimistic
+# Reputation multiplier — softened. The previous Poor=0.55 caused a death
+# spiral: forecast collapsed → staff cut → walkouts → rep dropped further.
+# Real-world data (Day 23 Tue "Poor" rep: actual covers 179) shows demand
+# barely halves even at Poor reputation.
 REP_MULT = {
-    "Poor": 0.55, "Fair": 0.75, "Good": 0.90,
-    "Very Good": 1.00, "Excellent": 1.10,
+    "Poor": 0.85, "Fair": 0.95, "Good": 1.00,
+    "Very Good": 1.05, "Excellent": 1.10,
 }
 
 # Forecast accuracy degrades: 85%, 70%, 55%. Wider safety multiplier on later days.

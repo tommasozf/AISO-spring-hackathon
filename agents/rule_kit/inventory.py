@@ -23,8 +23,16 @@ from .state import AgentState
 
 TARGET_DAYS_COVER = 4
 MIN_DAYS_COVER = 2          # trip-wire for "panic order"
-SAFETY_MULTIPLIER = 1.20    # over-order this much to absorb forecast error
+SAFETY_MULTIPLIER = 1.50    # over-order this much (also compensates for
+                            # underestimated daily_usage from uniform dish mix)
 SUPPLIER_RELIABILITY_FLOOR = 0.5  # don't order from suppliers below this
+
+# Only count pending orders that arrive within this many days when computing
+# days_of_cover. Pending arriving later can't help today's service even if the
+# paper total looks healthy. Was the root cause of Day 8's "no orders placed"
+# bug: 44 kg of Flour was pending but most arrived 3+ days later, so on-hand
+# was 2.2 kg while the policy reported 8 days of cover.
+PENDING_ARRIVAL_WINDOW = 1  # days
 
 
 # ---- API ----
@@ -59,16 +67,25 @@ def estimate_daily_usage(obs: dict, expected_covers_today: float) -> Dict[str, f
 
 
 def days_of_cover(ingredient: str, obs: dict, daily_usage: float) -> float:
+    """
+    On-hand + soon-arriving pending, expressed as days of forward cover.
+
+    "Soon-arriving" = delivers within PENDING_ARRIVAL_WINDOW days. Anything
+    later is excluded from the trigger calculation so we don't suppress new
+    orders when the pending queue is full of late-arriving items.
+    """
     if daily_usage <= 0:
         return float("inf")
     inv = _find(obs.get("inventory", []), "ingredient", ingredient)
     on_hand = (inv or {}).get("total_kg", 0.0)
-    pending = sum(
+    today = obs.get("day", 0)
+    pending_soon = sum(
         po.get("quantity_kg", 0.0)
         for po in (obs.get("pending_orders") or [])
         if po.get("ingredient") == ingredient
+        and (po.get("delivery_day", 999) - today) <= PENDING_ARRIVAL_WINDOW
     )
-    return (on_hand + pending) / daily_usage
+    return (on_hand + pending_soon) / daily_usage
 
 
 def reorder_plan(

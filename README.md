@@ -287,6 +287,9 @@ python -m agents.naive_rule         # Survives 30 days, score: ~-15,000
 python -m agents.starter_template   # Rule-based starting point
 python -m agents.llm_template       # LLM starting point (needs API key)
 python -m agents.compare            # Run all baselines side by side
+
+# 🚀 The main hackathon submission agent
+python -m agents.hybrid_agent       # Hybrid rule/LLM agent (requires OPENAI_API_KEY)
 ```
 
 ### Evaluate across scenarios and seeds
@@ -300,6 +303,16 @@ python -m agents.evaluate agents.my_agent --quiet                  # summary tab
 ```
 
 Runs your agent against every (scenario, seed) combination in parallel and prints a summary report.
+
+### 🌟 Running the Custom Hybrid Agent
+
+You must configure the server URL and OpenAI API key first, then run using the custom conda environment (`ai-spring`):
+```bash
+export OPENAI_API_KEY=sk-... # Add your active key
+export RESTBENCH_URL=http://52.48.183.209:8001
+conda run -n ai-spring python -m agents.evaluate agents.hybrid_agent --scenarios baseline,supply_crisis,tourist_season,renovation --seeds 42,88,123
+```
+*Note: Make sure your API key is active. The agent will still survive if the LLM fails, but optimization will suffer.*
 
 ---
 

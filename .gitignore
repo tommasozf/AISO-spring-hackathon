@@ -21,3 +21,5 @@ stress_test.py
 test_hackathon_readiness.py
 test_isolation.py
 agents/smart_agent.py
+
+.vscode/settings.json

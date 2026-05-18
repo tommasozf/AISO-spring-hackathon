@@ -327,6 +327,12 @@ def update_sticky_regimes(state: dict, observation: dict, day: int) -> None:
         if any(k in text for k in KEYWORDS["capacity_limited"]):
             until = day + _parse_alert_duration(text)
             sticky["capacity_limited"] = max(sticky.get("capacity_limited", 0), until)
+        if any(k in text for k in KEYWORDS["tourist"]):
+            until = day + _parse_alert_duration(text)
+            sticky["tourist"] = max(sticky.get("tourist", 0), until)
+        if any(k in text for k in KEYWORDS["demand_drought"]):
+            until = day + _parse_alert_duration(text)
+            sticky["demand_drought"] = max(sticky.get("demand_drought", 0), until)
         # supply_crisis with named "extended" or "long" outage also persists.
         if "extended" in text or "long" in text or "indefinite" in text:
             if any(k in text for k in KEYWORDS["supply_crisis"]):
@@ -408,6 +414,10 @@ def classify_tourist(obs: dict, state: dict, day: int) -> tuple[float, list[str]
     if trend == "Growing":
         score = min(1.0, score + 0.1)
         reasons.append("trend=Growing(+0.10)")
+    sticky_until = (state.get("sticky_regimes") or {}).get("tourist", 0)
+    if sticky_until >= day:
+        score = max(score, 0.7)
+        reasons.append(f"sticky_until=d{sticky_until}")
     return score, reasons
 
 
@@ -435,6 +445,10 @@ def classify_demand_drought(obs: dict, state: dict, day: int) -> tuple[float, li
     if bad_days >= 2:
         score = min(1.0, score + 0.10)
         reasons.append(f"bad_weather_fc={bad_days}(+0.10)")
+    sticky_until = (state.get("sticky_regimes") or {}).get("demand_drought", 0)
+    if sticky_until >= day:
+        score = max(score, 0.7)
+        reasons.append(f"sticky_until=d{sticky_until}")
     return score, reasons
 
 
@@ -680,6 +694,11 @@ def staffing_target(owner: str, t: str, knobs: dict, obs: dict, state: dict, day
     if summary.get("table_utilization_peak", 0) > 0.9:
         base += 1
 
+    weather = obs.get("weather_today") or "cloudy"
+    base += {"sunny": 1, "cloudy": 0, "rainy": -1, "stormy": -2}.get(weather, 0)
+    rep = obs.get("reputation_band") or "Good"
+    base += {"Excellent": 1, "Very Good": 0, "Good": 0, "Fair": -1, "Poor": -2}.get(rep, 0)
+
     if owner == "capacity_limited":
         # Cut hard during construction; recover later.
         cut = int(tier_value(t, low=2, med=3, high=4))
@@ -692,11 +711,6 @@ def staffing_target(owner: str, t: str, knobs: dict, obs: dict, state: dict, day
         base += int(tier_value(t, low=1, med=2, high=2))
     elif owner == "demand_drought":
         base -= int(tier_value(t, low=1, med=2, high=2))
-    elif owner == "baseline":
-        weather = obs.get("weather_today") or "cloudy"
-        base += {"sunny": 1, "cloudy": 0, "rainy": -1, "stormy": -2}.get(weather, 0)
-        rep = obs.get("reputation_band") or "Good"
-        base += {"Excellent": 1, "Very Good": 0, "Good": 0, "Fair": -1, "Poor": -2}.get(rep, 0)
 
     # Cash floor.
     cash = obs.get("cash", 15000)
@@ -740,19 +754,31 @@ def pricing_multipliers(
 
     # 2. Per-dish sale-history nudge.
     ds_hist = state.get("dish_sales", {})
+    dish_avgs = {}
+    total_avg_sales = 0.0
     for dish in active:
         hist = ds_hist.get(dish, [])
         avg = sum(hist) / len(hist) if hist else 0.0
-        if avg > 15:
-            nudge = 0.10
-        elif avg > 10:
-            nudge = 0.05
-        elif avg > 5:
-            nudge = 0.0
-        elif 0 < avg <= 3:
-            nudge = -0.08
+        dish_avgs[dish] = avg
+        total_avg_sales += avg
+
+    for dish in active:
+        avg = dish_avgs[dish]
+        if total_avg_sales > 0:
+            share = avg / total_avg_sales
+            expected_share = 1.0 / len(active)
+            ratio = share / expected_share
+            if ratio > 1.3:
+                nudge = 0.08
+            elif ratio > 1.1:
+                nudge = 0.04
+            elif ratio < 0.7:
+                nudge = -0.06
+            else:
+                nudge = 0.0
         else:
             nudge = 0.0  # no data → leave at base
+            
         # baseline (no regime tilt) still adjusts on sale history alone.
         m = 1.0 + regime_tilt + nudge
         m = max(0.81, min(1.19, m))
@@ -812,7 +838,7 @@ def should_happy_hour(owner: str, t: str, knobs: dict, obs: dict, state: dict, d
 
 # ---- daily special ----
 
-def pick_daily_special(owner: str, t: str, knobs: dict, obs: dict, state: dict) -> str | None:
+def pick_daily_special(owner: str, t: str, knobs: dict, obs: dict, state: dict, day: int) -> str | None:
     active = obs.get("active_menu") or []
     if not active:
         return None
@@ -871,9 +897,9 @@ def pick_daily_special(owner: str, t: str, knobs: dict, obs: dict, state: dict) 
         # Best-rated proxy: top seller (acts as anchor).
         candidates.sort(key=lambda d: -sold.get(d, 0))
         return candidates[0]
-    # baseline: rotate by day.
-    candidates.sort(key=lambda d: -sold.get(d, 0))
-    return candidates[0]
+    # baseline: rotate by day to ensure variety.
+    candidates.sort()
+    return candidates[day % len(candidates)]
 
 
 # ---- menu ----
@@ -1461,7 +1487,7 @@ def strategy(observation: dict, day: int) -> list[dict]:
 
     # Daily special
     ds_owner, ds_t = owners["daily_special"]
-    special = pick_daily_special(ds_owner, ds_t, knobs, observation, state)
+    special = pick_daily_special(ds_owner, ds_t, knobs, observation, state, day)
     if special:
         actions.append({"tool": "offer_daily_special", "args": {"dish": special}})
 

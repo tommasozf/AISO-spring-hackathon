@@ -201,6 +201,28 @@ def project_inventory(observation: dict, rates: dict) -> dict[str, dict]:
     return result
 
 
+def _simulate_days_until_stockout(
+    ingredient: str,
+    usable_stock: float,
+    daily_rate: float,
+    pending_orders: list[dict],
+    current_day: int,
+    days_ahead: int = 7,
+) -> int:
+    stock = usable_stock
+    deliveries: dict[int, float] = {}
+    for po in pending_orders:
+        if po.get("ingredient") == ingredient:
+            dd = po.get("delivery_day", current_day + 3)
+            deliveries[dd] = deliveries.get(dd, 0) + po.get("quantity_kg", 0)
+    for d in range(days_ahead):
+        stock += deliveries.get(current_day + d, 0)
+        stock -= daily_rate
+        if stock <= 0:
+            return d
+    return days_ahead
+
+
 def compute_orders(
     observation: dict, projections: dict, state: dict, day: int
 ) -> list[dict]:
@@ -265,6 +287,10 @@ def compute_orders(
             urgency = min(urgency, 0.5)
         if day <= 3:
             urgency = min(urgency, 1.0)
+        if pre_peak and urgency < 6:
+            urgency = min(urgency, 3.5)
+        if last_cov > 250 and proj["days_stockout"] < 4:
+            urgency = min(urgency, 1.5)
 
         if deficit > 0 or urgency < 4:
             qty = max(deficit, dr * 3)
@@ -479,11 +505,11 @@ def compute_pricing(observation: dict, state: dict, day: int) -> list[dict]:
         avg_sold = sum(hist) / len(hist) if hist else 0
 
         if avg_sold > 15:
-            target = base * 1.10
+            target = base * 1.20
         elif avg_sold > 10:
-            target = base * 1.05
+            target = base * 1.12
         elif avg_sold > 5:
-            target = base * 1.0
+            target = base * 1.05
         elif 0 < avg_sold <= 3:
             target = base * 0.92
         else:
@@ -677,7 +703,7 @@ def strategy(observation: dict, day: int) -> list[dict]:
     if staff is not None:
         actions.append({"tool": "set_staff_level", "args": {"level": staff}})
 
-    new_menu = compute_menu(observation, projections, state, day)
+    new_menu = compute_menu(observation, projections, dish_metrics, day)
     if new_menu is not None:
         actions.append({"tool": "set_menu", "args": {"dishes": new_menu}})
 
@@ -702,4 +728,4 @@ def strategy(observation: dict, day: int) -> list[dict]:
 
 if __name__ == "__main__":
     print("Running SmartRule agent...")
-    result = run_game(strategy, team_name="italian_waiters", seed=88, scenario="tourist_season")
+    result = run_game(strategy, team_name="italian_waiters", seed=42)
